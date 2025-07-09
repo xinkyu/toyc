@@ -78,11 +78,11 @@ let get_register var =
     None
 
 (* 溢出寄存器到栈上 *)
-let spill_register reg var stack_offset =
+let spill_register reg _var stack_offset =
   Printf.sprintf "\tsw %s, %d(sp)\n" reg.name stack_offset
 
 (* 从栈加载变量到寄存器 *)
-let load_from_stack reg var stack_offset =
+let load_from_stack reg _var stack_offset =
   Printf.sprintf "\tlw %s, %d(sp)\n" reg.name stack_offset
 
 (* 选择一个寄存器进行溢出 *)

@@ -228,18 +228,13 @@ let com_inst (inst : ir_inst) : string =
       free_all_registers ();
       
       (* 为返回值分配寄存器 *)
-      let dst_reg = match allocate_register dst_name with
-        | Some reg -> reg
-        | None -> 
-            (* 处理寄存器溢出 *)
-            match select_register_to_spill () with
-            | Some reg_to_spill ->
-                (* 这里实际上我们不需要溢出，因为我们刚刚释放了所有寄存器 *)
-                reg_to_spill.allocated := true;
-                reg_to_spill.var_name <- Some dst_name;
-                Hashtbl.add var_to_reg dst_name reg_to_spill;
-                reg_to_spill
-            | None -> failwith "No register available for allocation"
+      let dst_reg = 
+        (* 尝试使用a0作为返回值寄存器 *)
+        let a0_reg = List.find (fun r -> r.name = "a0") available_regs in
+        a0_reg.allocated := true;
+        a0_reg.var_name <- Some dst_name;
+        Hashtbl.add var_to_reg dst_name a0_reg;
+        a0_reg
       in
       
       (* 生成函数调用代码 *)
@@ -314,14 +309,23 @@ let com_inst (inst : ir_inst) : string =
              | None ->
                  (* 如果条件不在寄存器中，从栈中加载 *)
                  let load_code = l_operand "t0" cond in
-                 Printf.printf "%s" load_code; (* 打印加载指令 *)
-                 "t0")
+                 (* 返回加载指令和寄存器名称 *)
+                 load_code ^ "t0")
         | Imm i ->
-            Printf.printf "\tli t0, %d\n" i;
-            "t0"
+            Printf.sprintf "\tli t0, %d\n" i
       in
       
-      Printf.sprintf "\tbne %s, x0, %s\n" cond_reg_name label
+      (* 提取可能包含的加载指令 *)
+      let load_part, reg_name = 
+        if String.contains cond_reg_name '\n' then
+          let parts = String.split_on_char '\n' cond_reg_name in
+          let load = String.concat "\n" (List.filter (fun s -> s <> "") (List.init (List.length parts - 1) (fun i -> List.nth parts i))) in
+          load ^ "\n", List.nth parts (List.length parts - 1)
+        else
+          "", cond_reg_name
+      in
+      
+      load_part ^ Printf.sprintf "\tbne %s, x0, %s\n" reg_name label
       
   | Label label -> 
       (* 到达一个新的标签，可能需要调整寄存器状态 *)
@@ -336,23 +340,17 @@ let com_block (blk : ir_block) : string =
   let term_code = match blk.terminator with
     | TermGoto label -> Printf.sprintf "\tj %s\n" label
     | TermIf (cond, then_label, else_label) ->
-        (* 加载条件到寄存器 *)
-        let cond_code = match cond with
+        (* 加载条件到寄存器并获取寄存器名 *)
+        let load_code, cond_reg = match cond with
           | Reg r | Var r ->
               (match get_register r with
-               | Some reg -> Printf.sprintf "\t# 条件已在寄存器 %s 中\n" reg.name
-               | None -> Printf.sprintf "\tlw t0, %d(sp)\n" (get_sto r))
-          | Imm i -> Printf.sprintf "\tli t0, %d\n" i
+               | Some reg -> "", reg.name
+               | None -> Printf.sprintf "\tlw t0, %d(sp)\n" (get_sto r), "t0")
+          | Imm i -> Printf.sprintf "\tli t0, %d\n" i, "t0"
         in
+        
         (* 生成条件跳转 *)
-        let cond_reg = match cond with
-          | Reg r | Var r ->
-              (match get_register r with
-               | Some reg -> reg.name
-               | None -> "t0")
-          | Imm _ -> "t0"
-        in
-        cond_code ^ Printf.sprintf "\tbne %s, x0, %s\n\tj %s\n" cond_reg then_label else_label
+        load_code ^ Printf.sprintf "\tbne %s, x0, %s\n\tj %s\n" cond_reg then_label else_label
     | TermRet None -> 
         (* 返回前保存寄存器状态 *)
         let save_regs = List.fold_left (fun acc reg ->
@@ -399,8 +397,17 @@ let com_func (f : ir_func) : string =
       (fun i name ->
         let off = all_st name in
         if i < 8 then begin
-          (* 为前8个参数分配寄存器 - 在实际项目中可能需要更复杂的处理 *)
-          Printf.sprintf "\t# 参数 %s 在寄存器 a%d 中\n" name i
+          (* 为前8个参数分配寄存器 - 保存到栈上同时尝试保留在寄存器中 *)
+          let reg_info = List.find_opt (fun r -> r.name = "a" ^ string_of_int i) available_regs in
+          match reg_info with
+          | Some reg ->
+              reg.allocated := true;
+              reg.var_name <- Some name;
+              Hashtbl.add var_to_reg name reg;
+              Printf.sprintf "\tsw a%d, %d(sp)\n" i off
+          | None ->
+              (* 仅保存到栈上 *)
+              Printf.sprintf "\tsw a%d, %d(sp)\n" i off
         end else
           (* 栈传递的参数加载到栈帧中的固定位置 *)
           Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
@@ -457,8 +464,17 @@ let com_func_o (f : ir_func_o) : string =
       (fun i name ->
         let off = all_st name in
         if i < 8 then begin
-          (* 为前8个参数分配寄存器 - 更高级的实现可以尝试保留这些参数在原始寄存器中 *)
-          Printf.sprintf "\t# 参数 %s 在寄存器 a%d 中\n" name i
+          (* 为前8个参数分配寄存器 - 保存到栈上同时尝试保留在寄存器中 *)
+          let reg_info = List.find_opt (fun r -> r.name = "a" ^ string_of_int i) available_regs in
+          (match reg_info with
+           | Some reg ->
+               reg.allocated := true;
+               reg.var_name <- Some name;
+               Hashtbl.add var_to_reg name reg;
+               Printf.sprintf "\tsw a%d, %d(sp)\n" i off
+           | None ->
+               (* 如果找不到对应的寄存器（不应该发生），只保存到栈上 *)
+               Printf.sprintf "\tsw a%d, %d(sp)\n" i off)
         end else
           (* 栈传递的参数 *)
           Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
