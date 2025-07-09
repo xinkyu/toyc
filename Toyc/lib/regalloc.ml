@@ -55,10 +55,17 @@ let allocate_register var =
 
 (* 释放寄存器 *)
 let free_register reg =
-  reg.allocated := false;
-  match reg.var_name with
-  | Some var -> Hashtbl.remove var_to_reg var; reg.var_name <- None
-  | None -> ()
+  (* 确保寄存器名不为空 *)
+  if reg.name <> "" then begin
+    reg.allocated := false;
+    match reg.var_name with
+    | Some var -> 
+        (* 只有当变量存在于映射表中时才尝试删除 *)
+        if Hashtbl.mem var_to_reg var then
+          Hashtbl.remove var_to_reg var;
+        reg.var_name <- None
+    | None -> ()
+  end
 
 (* 释放所有寄存器 *)
 let free_all_registers () =
@@ -96,3 +103,15 @@ let select_register_to_spill () =
         else find_allocated rest
   in
   find_allocated available_regs
+
+(* 判断变量是否适合进行寄存器分配 *)
+let is_register_allocatable var =
+  (* 只为临时变量分配寄存器，不为用户变量和特殊变量分配 *)
+  String.starts_with ~prefix:"t" var && 
+  (* 排除ra和可能干扰的其他特殊名称 *)
+  var <> "ra" &&
+  (* 临时变量通常是t后跟数字 *)
+  (try
+     let _ = int_of_string (String.sub var 1 (String.length var - 1)) in
+     true
+   with _ -> false)
