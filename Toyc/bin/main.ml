@@ -45,12 +45,21 @@ let () =
   if print_ast then
     Printf.printf "AST:\n\n%s\n\n" (Print_ast.string_of_comp_unit ast);
 
+  (* 生成中间代码 *)
   let ir = AstToIR.program_ir ast true in
+
+  (* 应用优化 *)
+  let ir = 
+    if opt_flag then 
+      Optimizer.optimize_ir_program ir
+    else
+      ir
+  in
 
   if print_ir then begin 
     Printf.printf "IR:\n\n";
     Print_ir.print_ir_program ir;
-  end ;
+  end;
 
   let asm = IrToAsm.com_pro ir in
 
