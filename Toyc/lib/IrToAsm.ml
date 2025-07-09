@@ -51,6 +51,9 @@ let com_inst (inst : ir_inst) : string =
       let dst_name = match dst with Reg r | Var r -> r | _ -> failwith "Bad dst" in
       
       (* 尝试为目标变量分配寄存器 *)
+      (* 可能需要的溢出代码 *)
+      let spill_code = ref "" in
+      
       let dst_reg = match allocate_register dst_name with
         | Some reg -> reg
         | None -> 
@@ -61,9 +64,9 @@ let com_inst (inst : ir_inst) : string =
                 (match reg_to_spill.var_name with
                 | Some var ->
                     let stack_offset = get_or_create_stack_offset var in
-                    free_register reg_to_spill;
-                    Printf.sprintf "\tsw %s, %d(sp)\n" reg_to_spill.name stack_offset
-                | None -> "");
+                    spill_code := Printf.sprintf "\tsw %s, %d(sp)\n" reg_to_spill.name stack_offset;
+                    free_register reg_to_spill
+                | None -> ());
                 
                 (* 重新分配该寄存器 *)
                 reg_to_spill.allocated := true;
@@ -102,9 +105,12 @@ let com_inst (inst : ir_inst) : string =
       in
       
       (* 结果已在目标寄存器中，不需要额外保存 *)
-      lhs_code ^ rhs_code ^ op_code
+      !spill_code ^ lhs_code ^ rhs_code ^ op_code
   | Unop (op, dst, src) ->
       let dst_name = match dst with Reg r | Var r -> r | _ -> failwith "Bad dst" in
+      
+      (* 可能需要的溢出代码 *)
+      let spill_code = ref "" in
       
       (* 尝试为目标变量分配寄存器 *)
       let dst_reg = match allocate_register dst_name with
@@ -117,9 +123,9 @@ let com_inst (inst : ir_inst) : string =
                 (match reg_to_spill.var_name with
                 | Some var ->
                     let stack_offset = get_or_create_stack_offset var in
-                    free_register reg_to_spill;
-                    Printf.sprintf "\tsw %s, %d(sp)\n" reg_to_spill.name stack_offset
-                | None -> "");
+                    spill_code := Printf.sprintf "\tsw %s, %d(sp)\n" reg_to_spill.name stack_offset;
+                    free_register reg_to_spill
+                | None -> ());
                 
                 (* 重新分配该寄存器 *)
                 reg_to_spill.allocated := true;
@@ -140,10 +146,13 @@ let com_inst (inst : ir_inst) : string =
         | _ -> failwith ("Unknown unop: " ^ op)
       in
       
-      load_src ^ op_code
+      !spill_code ^ load_src ^ op_code
       
   | Assign (dst, src) ->
       let dst_name = match dst with Reg r | Var r -> r | _ -> failwith "Bad dst" in
+      
+      (* 可能需要的溢出代码 *)
+      let spill_code = ref "" in
       
       (* 尝试为目标变量分配寄存器 *)
       let dst_reg = match allocate_register dst_name with
@@ -156,9 +165,9 @@ let com_inst (inst : ir_inst) : string =
                 (match reg_to_spill.var_name with
                 | Some var ->
                     let stack_offset = get_or_create_stack_offset var in
-                    free_register reg_to_spill;
-                    Printf.sprintf "\tsw %s, %d(sp)\n" reg_to_spill.name stack_offset
-                | None -> "");
+                    spill_code := Printf.sprintf "\tsw %s, %d(sp)\n" reg_to_spill.name stack_offset;
+                    free_register reg_to_spill
+                | None -> ());
                 
                 (* 重新分配该寄存器 *)
                 reg_to_spill.allocated := true;
@@ -169,7 +178,7 @@ let com_inst (inst : ir_inst) : string =
       in
       
       (* 直接加载源操作数到目标寄存器 *)
-      match src with
+      let load_code = match src with
       | Imm i -> Printf.sprintf "\tli %s, %d\n" dst_reg.name i
       | Reg src_name | Var src_name ->
           match get_register src_name with
@@ -181,6 +190,9 @@ let com_inst (inst : ir_inst) : string =
           | None ->
               (* 从栈中加载源变量 *)
               Printf.sprintf "\tlw %s, %d(sp)\n" dst_reg.name (get_sto src_name)
+      in
+      
+      !spill_code ^ load_code
   (* Not used *)
   | Load (dst, src) ->
       let dst_off =
@@ -230,11 +242,22 @@ let com_inst (inst : ir_inst) : string =
       (* 为返回值分配寄存器 *)
       let dst_reg = 
         (* 尝试使用a0作为返回值寄存器 *)
-        let a0_reg = List.find (fun r -> r.name = "a0") available_regs in
-        a0_reg.allocated := true;
-        a0_reg.var_name <- Some dst_name;
-        Hashtbl.add var_to_reg dst_name a0_reg;
-        a0_reg
+        match List.find_opt (fun r -> r.name = "a0") available_regs with
+        | Some a0_reg ->
+            a0_reg.allocated := true;
+            a0_reg.var_name <- Some dst_name;
+            Hashtbl.add var_to_reg dst_name a0_reg;
+            a0_reg
+        | None ->
+            (* 如果没有a0寄存器(不应该发生)，使用第一个可用寄存器 *)
+            match List.find_opt (fun r -> not !(r.allocated)) available_regs with
+            | Some reg ->
+                reg.allocated := true;
+                reg.var_name <- Some dst_name;
+                Hashtbl.add var_to_reg dst_name reg;
+                reg
+            | None ->
+                failwith "No registers available for function return value"
       in
       
       (* 生成函数调用代码 *)
