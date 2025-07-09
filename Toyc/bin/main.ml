@@ -35,6 +35,9 @@ let () =
   let block_ir = List.exists (( = ) "-block-ir") args in
   let opt_flag = List.exists (( = ) "-opt") args in
   let opt_flag = block_ir || opt_flag in
+  
+  (* 始终启用优化 *)
+  let opt_flag = true in
 
   (* 读取 stdin 输入 *)
   let input = read_all_input () in
@@ -45,25 +48,12 @@ let () =
   if print_ast then
     Printf.printf "AST:\n\n%s\n\n" (Print_ast.string_of_comp_unit ast);
 
-  (* 生成中间代码 *)
-  let ir = AstToIR.program_ir ast true in
-
-  (* 应用优化 *)
-  let ir = 
-    if opt_flag then 
-      try
-        Optimizer.optimize_ir_program ir
-      with e ->
-        Printf.eprintf "优化过程中出现错误: %s\n" (Printexc.to_string e);
-        ir
-    else
-      ir
-  in
+  let ir = AstToIR.program_ir ast opt_flag in
 
   if print_ir then begin 
     Printf.printf "IR:\n\n";
     Print_ir.print_ir_program ir;
-  end;
+  end ;
 
   let asm = IrToAsm.com_pro ir in
 

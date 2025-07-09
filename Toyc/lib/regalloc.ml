@@ -1,152 +1,98 @@
-open Ir
+(* 寄存器分配模块 *)
 
-(* 定义变量的活跃区间 *)
-type live_interval = {
-  var_name: string;
-  start: int;  (* 开始位置 *)
-  ending: int;  (* 结束位置 *)
-  mutable assigned_reg: string option;  (* 分配的寄存器 *)
+(* 寄存器信息 *)
+type reg_info = {
+  name: string;         (* 寄存器名称，如 "t0", "a0" *)
+  allocated: bool ref;  (* 是否已分配 *)
+  mutable var_name: string option; (* 当前保存的变量名，None表示未使用 *)
 }
 
-(* 表示寄存器使用情况 *)
-type register_status = {
-  mutable free: bool;
-  mutable current_var: string option;
-  mutable expires_at: int;
-}
-
-(* 创建可用的寄存器池 - RISC-V 临时寄存器 *)
-let create_register_pool () =
-  let registers = [
-    "t0"; "t1"; "t2"; "t3"; "t4"; "t5"; "t6";  (* 临时寄存器 *)
-    "s1"; "s2"; "s3"; "s4"; "s5"; "s6"; "s7"; "s8"; "s9"; "s10"; "s11";  (* 保存寄存器 *)
-  ] in
-  List.map (fun reg -> (reg, { free = true; current_var = None; expires_at = 0 })) registers
-
-(* 计算变量的活跃区间 *)
-let calculate_live_intervals (insts : ir_inst list) : live_interval list =
-  let var_first_use = Hashtbl.create 100 in
-  let var_last_use = Hashtbl.create 100 in
+(* RISC-V寄存器集合 *)
+let available_regs = [
+  (* 临时寄存器 *)
+  { name = "t0"; allocated = ref false; var_name = None };
+  { name = "t1"; allocated = ref false; var_name = None };
+  { name = "t2"; allocated = ref false; var_name = None };
+  { name = "t3"; allocated = ref false; var_name = None };
+  { name = "t4"; allocated = ref false; var_name = None };
+  { name = "t5"; allocated = ref false; var_name = None };
+  { name = "t6"; allocated = ref false; var_name = None };
   
-  (* 辅助函数：更新变量的使用位置 *)
-  let update_use var_name pos =
-    if not (Hashtbl.mem var_first_use var_name) then
-      Hashtbl.add var_first_use var_name pos;
-    Hashtbl.replace var_last_use var_name pos
+  (* 参数寄存器，可用于临时计算 *)
+  { name = "a0"; allocated = ref false; var_name = None };
+  { name = "a1"; allocated = ref false; var_name = None };
+  { name = "a2"; allocated = ref false; var_name = None };
+  { name = "a3"; allocated = ref false; var_name = None };
+  { name = "a4"; allocated = ref false; var_name = None };
+  { name = "a5"; allocated = ref false; var_name = None };
+  { name = "a6"; allocated = ref false; var_name = None };
+  { name = "a7"; allocated = ref false; var_name = None };
+]
+
+(* 变量到寄存器的映射表 *)
+let var_to_reg = Hashtbl.create 100
+
+(* 分配寄存器 *)
+let allocate_register var =
+  try
+    (* 检查变量是否已经分配了寄存器 *)
+    Some (Hashtbl.find var_to_reg var)
+  with Not_found ->
+    (* 尝试分配一个未使用的寄存器 *)
+    let rec find_free regs =
+      match regs with
+      | [] -> None (* 没有空闲寄存器 *)
+      | reg :: rest ->
+          if not !(reg.allocated) then (
+            reg.allocated := true;
+            reg.var_name <- Some var;
+            Hashtbl.add var_to_reg var reg;
+            Some reg
+          ) else
+            find_free rest
+    in
+    find_free available_regs
+
+(* 释放寄存器 *)
+let free_register reg =
+  reg.allocated := false;
+  match reg.var_name with
+  | Some var -> Hashtbl.remove var_to_reg var; reg.var_name <- None
+  | None -> ()
+
+(* 释放所有寄存器 *)
+let free_all_registers () =
+  List.iter (fun reg -> 
+    reg.allocated := false;
+    match reg.var_name with
+    | Some var -> Hashtbl.remove var_to_reg var; reg.var_name <- None
+    | None -> ()
+  ) available_regs;
+  Hashtbl.clear var_to_reg
+
+(* 获取变量的寄存器，如果已分配 *)
+let get_register var =
+  try
+    Some (Hashtbl.find var_to_reg var)
+  with Not_found ->
+    None
+
+(* 溢出寄存器到栈上 *)
+let spill_register reg var stack_offset =
+  Printf.sprintf "\tsw %s, %d(sp)\n" reg.name stack_offset
+
+(* 从栈加载变量到寄存器 *)
+let load_from_stack reg var stack_offset =
+  Printf.sprintf "\tlw %s, %d(sp)\n" reg.name stack_offset
+
+(* 选择一个寄存器进行溢出 *)
+let select_register_to_spill () =
+  (* 简单策略：选择第一个已分配的寄存器 *)
+  let rec find_allocated regs =
+    match regs with
+    | [] -> None
+    | reg :: rest ->
+        if !(reg.allocated) then Some reg
+        else find_allocated rest
   in
-  
-  (* 处理单个操作数 *)
-  let process_operand op pos =
-    match op with
-    | Var name | Reg name -> update_use name pos
-    | _ -> ()
-  in
-  
-  (* 处理指令中的变量使用 *)
-  List.iteri (fun pos inst ->
-    match inst with
-    | Binop (_, dst, op1, op2) ->
-      (match dst with 
-       | Var name | Reg name -> update_use name pos
-       | _ -> ());
-      process_operand op1 pos;
-      process_operand op2 pos
-      
-    | Unop (_, dst, src) ->
-      (match dst with 
-       | Var name | Reg name -> update_use name pos
-       | _ -> ());
-      process_operand src pos
-      
-    | Assign (dst, src) ->
-      (match dst with 
-       | Var name | Reg name -> update_use name pos
-       | _ -> ());
-      process_operand src pos
-      
-    | Load (dst, src) ->
-      (match dst with 
-       | Var name | Reg name -> update_use name pos
-       | _ -> ());
-      process_operand src pos
-      
-    | Store (dst, src) ->
-      process_operand dst pos;
-      process_operand src pos
-      
-    | Call (dst, _, args) ->
-      (match dst with 
-       | Var name | Reg name -> update_use name pos
-       | _ -> ());
-      List.iter (fun arg -> process_operand arg pos) args
-      
-    | IfGoto (cond, _) -> 
-      process_operand cond pos
-      
-    | Ret (Some op) -> 
-      process_operand op pos
-      
-    | _ -> ()
-  ) insts;
-  
-  (* 构建活跃区间列表 *)
-  let intervals = ref [] in
-  Hashtbl.iter (fun var_name first ->
-    let last = Hashtbl.find var_last_use var_name in
-    intervals := { var_name = var_name; start = first; ending = last; assigned_reg = None } :: !intervals
-  ) var_first_use;
-  
-  (* 按开始位置排序 *)
-  List.sort (fun a b -> compare a.start b.start) !intervals
-
-(* 线性扫描寄存器分配算法 *)
-let linear_scan_register_allocation (intervals : live_interval list) =
-  (* 创建寄存器池 *)
-  let reg_pool = create_register_pool () in
-  let active = ref [] in
-  
-  (* 按照开始时间排序的区间 *)
-  List.iter (fun interval ->
-    (* 过期的区间从活跃列表中移除 *)
-    active := List.filter (fun i -> i.ending >= interval.start) !active;
-    
-    (* 为过期区间的寄存器标记为可用 *)
-    List.iter (fun expired_interval ->
-      match expired_interval.assigned_reg with
-      | Some reg_name ->
-          let (_, status) = List.find (fun (r, _) -> r = reg_name) reg_pool in
-          status.free <- true;
-          status.current_var <- None
-      | None -> ()
-    ) (List.filter (fun i -> i.ending < interval.start) !active);
-    
-    (* 尝试分配寄存器 *)
-    let assigned = ref false in
-    List.iter (fun (reg_name, status) ->
-      if not !assigned && status.free then begin
-        interval.assigned_reg <- Some reg_name;
-        status.free <- false;
-        status.current_var <- Some interval.var_name;
-        status.expires_at <- interval.ending;
-        assigned := true
-      end
-    ) reg_pool;
-    
-    (* 如果没有可用寄存器，该变量将保留在栈上 *)
-    active := interval :: !active
-  ) intervals;
-  
-  (* 返回分配结果：变量名到寄存器的映射 *)
-  let result = Hashtbl.create (List.length intervals) in
-  List.iter (fun interval ->
-    match interval.assigned_reg with
-    | Some reg -> Hashtbl.add result interval.var_name reg
-    | None -> () (* 保留在栈上的变量不添加到结果中 *)
-  ) intervals;
-  
-  result
-
-(* 主函数：对函数体进行寄存器分配 *)
-let allocate_registers (func : ir_func) : (string, string) Hashtbl.t =
-  let intervals = calculate_live_intervals func.body in
-  linear_scan_register_allocation intervals
+  find_allocated available_regs

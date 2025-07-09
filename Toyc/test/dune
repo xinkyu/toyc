@@ -1,3 +1,2 @@
 (test
- (name test_Toyc)
- (libraries compilerlib))
+ (name test_Toyc))
