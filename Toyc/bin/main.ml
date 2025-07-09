@@ -51,7 +51,11 @@ let () =
   (* 应用优化 *)
   let ir = 
     if opt_flag then 
-      Optimizer.optimize_ir_program ir
+      try
+        Optimizer.optimize_ir_program ir
+      with e ->
+        Printf.eprintf "优化过程中出现错误: %s\n" (Printexc.to_string e);
+        ir
     else
       ir
   in

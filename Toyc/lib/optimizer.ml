@@ -30,24 +30,26 @@ let fold_constant op op1 op2 =
   | _ -> failwith "Non-constant operands"
 
 (* 强度削减优化 *)
-let strength_reduction op op1 op2 =
+let strength_reduction op dst op1 op2 =
   match (op, op1, op2) with
-  | "*", op1, Imm 2 -> Binop ("+", op1, op1, op1)  (* x*2 => x+x *)
+  | "*", op1, Imm 2 -> Binop ("+", dst, op1, op1)  (* x*2 => x+x *)
   | "*", op1, Imm i when i > 0 && i land (i - 1) = 0 ->
-      let shift = int_of_float (log (float i) /. log 2.0) in
-      Binop ("<<", op1, Imm shift)  (* x*2^n => x<<n *)
-  | "/", op1, Imm 2 -> Binop (">>", op1, Imm 1)  (* x/2 => x>>1 *)
+      (* 使用 slli 指令，但在 IR 层面仍然使用乘法，在 IrToAsm 中进行转换 *)
+      Binop ("*", dst, op1, op2)
+  | "/", op1, Imm 2 -> 
+      (* 使用 srai 指令，但在 IR 层面仍然使用除法，在 IrToAsm 中进行转换 *)
+      Binop ("/", dst, op1, op2)
   | "/", op1, Imm i when i > 0 && i land (i - 1) = 0 ->
-      let shift = int_of_float (log (float i) /. log 2.0) in
-      Binop (">>", op1, Imm shift)  (* x/2^n => x>>n *)
-  | _ -> Binop (op, op1, op2)
+      (* 使用 srai 指令，但在 IR 层面仍然使用除法，在 IrToAsm 中进行转换 *)
+      Binop ("/", dst, op1, op2)
+  | _ -> Binop (op, dst, op1, op2)
 
 (* 优化指令 *)
 let optimize_inst = function
   | Binop (op, dst, op1, op2) when is_constant_foldable op op1 op2 ->
       Assign (dst, fold_constant op op1 op2)
   | Binop (op, dst, op1, op2) ->
-      strength_reduction op op1 op2
+      strength_reduction op dst op1 op2
   | Unop (op, dst, Imm i) ->
       let res = match op with
         | "+" -> Imm i
