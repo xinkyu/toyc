@@ -401,7 +401,7 @@ let com_block (blk : ir_block) : string =
         ) "" available_regs in
         load_ret ^ save_regs ^ 
         Printf.sprintf "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n" (get_sto "ra")
-    | TermSeq next -> 
+    | TermSeq _next -> 
         (* 如果下一个块紧跟着当前块，不需要额外跳转 *)
         ""
   in
