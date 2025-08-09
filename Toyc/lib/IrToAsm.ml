@@ -87,8 +87,8 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
   ctx.stack_size <- 8; (* ra 和 fp 各占 4 字节 *)
 
   (* 2. 为所有参数分配栈空间 *)
-  List.iteri
-    (fun i arg_name ->
+  List.iter
+    (fun arg_name -> (* <-- 修复#1: 使用 List.iter 替代 List.iteri, 因为我们不需要索引 *)
       ignore (alloc_on_stack ctx arg_name))
     f_args;
 
@@ -117,10 +117,6 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
 
   (* --- 阶段二: 生成汇编代码 --- *)
   
-  (*
-    将获取和释放临时寄存器的函数定义在 com_func_generic 内部,
-    这样 com_inst 和 com_block 都能访问到, 且状态隔离在单个函数编译中。
-  *)
   let get_temp_reg () =
     match ctx.reg_pool with
     | [] -> failwith "Out of temporary registers"
@@ -130,11 +126,6 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
   in
   let free_temp_reg reg = ctx.reg_pool <- reg :: ctx.reg_pool in
 
-  (*
-    新版指令翻译函数
-    - 使用 ctx 来管理状态
-    - 动态获取和释放临时寄存器
-  *)
   let rec com_inst (inst : ir_inst) : string =
     match inst with
     | Binop (op, dst, lhs, rhs) ->
@@ -172,7 +163,7 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
           match op with
           | "-" -> Printf.sprintf "\tneg %s, %s\n" t1 t1
           | "!" -> Printf.sprintf "\tseqz %s, %s\n" t1 t1
-          | "+" -> "" (* +x is just x, no instruction needed *)
+          | "+" -> ""
           | _ -> failwith ("Unknown unop: " ^ op)
         in
         let store_code = s_operand ctx t1 dst in
@@ -205,12 +196,12 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
         let call_code = Printf.sprintf "\tcall %s\n" fname in
         let save_result =
           match dst with
-          | Reg r | Var r -> s_operand ctx "a0" dst
+          | Reg _ | Var _ -> s_operand ctx "a0" dst (* <-- 修复#2: 使用 _ 替代 r *)
           | _ -> ""
         in
         args_code ^ call_code ^ save_result
 
-    | Ret None -> "\tj .Lret_%s\n" (* 跳转到函数末尾的统一返回点 *)
+    | Ret None -> "\tj .Lret_%s\n"
     | Ret (Some op) ->
         let load_ret = l_operand ctx "a0" op in
         load_ret ^ "\tj .Lret_%s\n"
@@ -224,7 +215,7 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
         load_cond ^ branch_code
         
     | Label label -> Printf.sprintf "%s:\n" label
-    | Load _ | Store _ -> " # Load/Store not implemented in this simplified version\n"
+    | Load _ | Store _ -> " # Load/Store not implemented\n"
   
   and com_block (blk : ir_block) : string =
     let inst_codes = List.map com_inst blk.insts |> String.concat "" in
@@ -237,16 +228,15 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
           let branch_code = Printf.sprintf "\tbnez %s, %s\n" t1 l1 in
           free_temp_reg t1;
           load_cond ^ branch_code ^ Printf.sprintf "\tj %s\n" l2
-      | TermRet None -> "\tj .Lret_%s\n" (* 跳转到统一返回点 *)
+      | TermRet None -> "\tj .Lret_%s\n"
       | TermRet (Some op) ->
           let load_ret = l_operand ctx "a0" op in
           load_ret ^ "\tj .Lret_%s\n"
-      | TermSeq l -> Printf.sprintf "\tj %s\n" l (* 顺序块，直接跳转 *)
+      | TermSeq l -> Printf.sprintf "\tj %s\n" l
     in
     Printf.sprintf "%s:\n" blk.label ^ inst_codes ^ term_code
   in
 
-  (* 1. 函数头部 (Prologue) *)
   let prologue = Printf.sprintf "
 .globl %s
 %s:
@@ -263,7 +253,6 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
     ctx.stack_size
   in
 
-  (* 2. 将传入的参数从 a0-a7 寄存器或调用者的栈中存入当前函数的栈帧 *)
   let setup_args =
     List.mapi
       (fun i arg_name ->
@@ -280,7 +269,6 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
     |> String.concat ""
   in
 
-  (* 3. 编译函数体 *)
   let body_code =
     if is_optimized then
       List.map com_block f_blocks
@@ -292,7 +280,6 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
       |> Str.global_replace (Str.regexp_string ".Lret_%s") (".Lret_" ^ f_name)
   in
 
-  (* 4. 函数尾声 (Epilogue) *)
   let epilogue = Printf.sprintf "
 .Lret_%s:
 \tlw fp, %d(sp)
