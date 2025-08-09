@@ -76,146 +76,6 @@ let s_operand ctx src_reg (op : operand) : string =
           else "" (* 已经在目标寄存器，无需移动 *))
 
 (*
-  新版指令翻译函数
-  - 使用 ctx 来管理状态
-  - 动态获取和释放临时寄存器
-*)
-let com_inst (ctx : func_ctx) (inst : ir_inst) : string =
-  let get_temp_reg () =
-    match ctx.reg_pool with
-    | [] -> failwith "Out of temporary registers"
-    | reg :: rest ->
-        ctx.reg_pool <- rest;
-        reg
-  in
-  let free_temp_reg reg = ctx.reg_pool <- reg :: ctx.reg_pool in
-
-  match inst with
-  | Binop (op, dst, lhs, rhs) ->
-      let t1 = get_temp_reg () in
-      let t2 = get_temp_reg () in
-      let code_lhs = l_operand ctx t1 lhs in
-      let code_rhs = l_operand ctx t2 rhs in
-
-      let op_code =
-        match op with
-        | "+" -> Printf.sprintf "\tadd %s, %s, %s\n" t1 t1 t2
-        | "-" -> Printf.sprintf "\tsub %s, %s, %s\n" t1 t1 t2
-        | "*" -> Printf.sprintf "\tmul %s, %s, %s\n" t1 t1 t2
-        | "/" -> Printf.sprintf "\tdiv %s, %s, %s\n" t1 t1 t2
-        | "%" -> Printf.sprintf "\trem %s, %s, %s\n" t1 t1 t2
-        | "==" -> Printf.sprintf "\tsub %s, %s, %s\n\tseqz %s, %s\n" t1 t1 t2 t1 t1
-        | "!=" -> Printf.sprintf "\tsub %s, %s, %s\n\tsnez %s, %s\n" t1 t1 t2 t1 t1
-        | "<" -> Printf.sprintf "\tslt %s, %s, %s\n" t1 t1 t2
-        | "<=" -> Printf.sprintf "\tsgt %s, %s, %s\n\txori %s, %s, 1\n" t1 t2 t1 t1 t1
-        | ">" -> Printf.sprintf "\tsgt %s, %s, %s\n" t1 t1 t2
-        | ">=" -> Printf.sprintf "\tslt %s, %s, %s\n\txori %s, %s, 1\n" t1 t2 t1 t1 t1
-        | "&&" -> Printf.sprintf "\tand %s, %s, %s\n" t1 t1 t2
-        | "||" -> Printf.sprintf "\tor %s, %s, %s\n" t1 t1 t2
-        | _ -> failwith ("Unknown binop: " ^ op)
-      in
-      let store_code = s_operand ctx t1 dst in
-      free_temp_reg t1;
-      free_temp_reg t2;
-      code_lhs ^ code_rhs ^ op_code ^ store_code
-
-  | Unop (op, dst, src) ->
-      let t1 = get_temp_reg () in
-      let load_src = l_operand ctx t1 src in
-      let op_code =
-        match op with
-        | "-" -> Printf.sprintf "\tneg %s, %s\n" t1 t1
-        | "!" -> Printf.sprintf "\tseqz %s, %s\n" t1 t1
-        | "+" -> "" (* +x is just x, no instruction needed *)
-        | _ -> failwith ("Unknown unop: " ^ op)
-      in
-      let store_code = s_operand ctx t1 dst in
-      free_temp_reg t1;
-      load_src ^ op_code ^ store_code
-
-  | Assign (dst, src) ->
-      let t1 = get_temp_reg () in
-      let load_code = l_operand ctx t1 src in
-      let store_code = s_operand ctx t1 dst in
-      free_temp_reg t1;
-      load_code ^ store_code
-
-  | Call (dst, fname, args) ->
-      (*
-        在函数调用前，我们需要保存所有正在使用的 caller-saved 寄存器。
-        但在我们这个更简单的模型中，我们分配的临时寄存器 (t0-t6) 都是 caller-saved。
-        我们可以认为在 call 之前，所有 live 的值都已经在它们的主存位置（栈），
-        临时寄存器可以安全地被覆盖。
-        一个更完整的实现需要做活跃度分析来精确地保存/恢复。
-        目前，我们假设临时寄存器池在调用前后是空的。
-      *)
-      
-      (* 1. 将参数加载到 a0-a7 或栈上 *)
-      let args_code =
-        List.mapi
-          (fun i arg ->
-            if i < 8 then
-              l_operand ctx (Printf.sprintf "a%d" i) arg
-            else
-              let t1 = get_temp_reg () in
-              let offset = (i - 8) * 4 in
-              let load_arg = l_operand ctx t1 arg in
-              let store_arg = Printf.sprintf "\tsw %s, %d(sp)\n" t1 offset in
-              free_temp_reg t1;
-              load_arg ^ store_arg)
-          args
-        |> String.concat ""
-      in
-
-      (* 2. 函数调用 *)
-      let call_code = Printf.sprintf "\tcall %s\n" fname in
-
-      (* 3. 保存返回值 *)
-      let save_result =
-        match dst with
-        | Reg r | Var r -> s_operand ctx "a0" dst
-        | _ -> ""
-      in
-      args_code ^ call_code ^ save_result
-
-  | Ret None -> "\tj .Lret_%s\n" (* 跳转到函数末尾的统一返回点 *)
-  | Ret (Some op) ->
-      let load_ret = l_operand ctx "a0" op in
-      load_ret ^ "\tj .Lret_%s\n"
-
-  | Goto label -> Printf.sprintf "\tj %s\n" label
-  | IfGoto (cond, label) ->
-      let t1 = get_temp_reg () in
-      let load_cond = l_operand ctx t1 cond in
-      let branch_code = Printf.sprintf "\tbnez %s, %s\n" t1 label in
-      free_temp_reg t1;
-      load_cond ^ branch_code
-      
-  | Label label -> Printf.sprintf "%s:\n" label
-  | Load _ | Store _ -> " # Load/Store not implemented in this simplified version\n"
-
-
-(* 编译一个基本块 *)
-let com_block (ctx : func_ctx) (blk : ir_block) : string =
-  let inst_codes = List.map (com_inst ctx) blk.insts |> String.concat "" in
-  let term_code =
-    match blk.terminator with
-    | TermGoto l -> Printf.sprintf "\tj %s\n" l
-    | TermIf (cond, l1, l2) ->
-        let t1 = get_temp_reg () in
-        let load_cond = l_operand ctx t1 cond in
-        let branch_code = Printf.sprintf "\tbnez %s, %s\n" t1 l1 in
-        free_temp_reg t1;
-        load_cond ^ branch_code ^ Printf.sprintf "\tj %s\n" l2
-    | TermRet None -> "\tj .Lret_%s\n" (* 跳转到统一返回点 *)
-    | TermRet (Some op) ->
-        let load_ret = l_operand ctx "a0" op in
-        load_ret ^ "\tj .Lret_%s\n"
-    | TermSeq l -> Printf.sprintf "\tj %s\n" l (* 顺序块，直接跳转 *)
-  in
-  Printf.sprintf "%s:\n" blk.label ^ inst_codes ^ term_code
-
-(*
   新版函数编译流程
 *)
 let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst list) (f_blocks : ir_block list) (is_optimized : bool) : string =
@@ -257,6 +117,137 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
 
   (* --- 阶段二: 生成汇编代码 --- *)
   
+  (*
+    将获取和释放临时寄存器的函数定义在 com_func_generic 内部,
+    这样 com_inst 和 com_block 都能访问到, 且状态隔离在单个函数编译中。
+  *)
+  let get_temp_reg () =
+    match ctx.reg_pool with
+    | [] -> failwith "Out of temporary registers"
+    | reg :: rest ->
+        ctx.reg_pool <- rest;
+        reg
+  in
+  let free_temp_reg reg = ctx.reg_pool <- reg :: ctx.reg_pool in
+
+  (*
+    新版指令翻译函数
+    - 使用 ctx 来管理状态
+    - 动态获取和释放临时寄存器
+  *)
+  let com_inst (inst : ir_inst) : string =
+    match inst with
+    | Binop (op, dst, lhs, rhs) ->
+        let t1 = get_temp_reg () in
+        let t2 = get_temp_reg () in
+        let code_lhs = l_operand ctx t1 lhs in
+        let code_rhs = l_operand ctx t2 rhs in
+
+        let op_code =
+          match op with
+          | "+" -> Printf.sprintf "\tadd %s, %s, %s\n" t1 t1 t2
+          | "-" -> Printf.sprintf "\tsub %s, %s, %s\n" t1 t1 t2
+          | "*" -> Printf.sprintf "\tmul %s, %s, %s\n" t1 t1 t2
+          | "/" -> Printf.sprintf "\tdiv %s, %s, %s\n" t1 t1 t2
+          | "%" -> Printf.sprintf "\trem %s, %s, %s\n" t1 t1 t2
+          | "==" -> Printf.sprintf "\tsub %s, %s, %s\n\tseqz %s, %s\n" t1 t1 t2 t1 t1
+          | "!=" -> Printf.sprintf "\tsub %s, %s, %s\n\tsnez %s, %s\n" t1 t1 t2 t1 t1
+          | "<" -> Printf.sprintf "\tslt %s, %s, %s\n" t1 t1 t2
+          | "<=" -> Printf.sprintf "\tsgt %s, %s, %s\n\txori %s, %s, 1\n" t1 t2 t1 t1 t1
+          | ">" -> Printf.sprintf "\tsgt %s, %s, %s\n" t1 t1 t2
+          | ">=" -> Printf.sprintf "\tslt %s, %s, %s\n\txori %s, %s, 1\n" t1 t2 t1 t1 t1
+          | "&&" -> Printf.sprintf "\tand %s, %s, %s\n" t1 t1 t2
+          | "||" -> Printf.sprintf "\tor %s, %s, %s\n" t1 t1 t2
+          | _ -> failwith ("Unknown binop: " ^ op)
+        in
+        let store_code = s_operand ctx t1 dst in
+        free_temp_reg t1;
+        free_temp_reg t2;
+        code_lhs ^ code_rhs ^ op_code ^ store_code
+
+    | Unop (op, dst, src) ->
+        let t1 = get_temp_reg () in
+        let load_src = l_operand ctx t1 src in
+        let op_code =
+          match op with
+          | "-" -> Printf.sprintf "\tneg %s, %s\n" t1 t1
+          | "!" -> Printf.sprintf "\tseqz %s, %s\n" t1 t1
+          | "+" -> "" (* +x is just x, no instruction needed *)
+          | _ -> failwith ("Unknown unop: " ^ op)
+        in
+        let store_code = s_operand ctx t1 dst in
+        free_temp_reg t1;
+        load_src ^ op_code ^ store_code
+
+    | Assign (dst, src) ->
+        let t1 = get_temp_reg () in
+        let load_code = l_operand ctx t1 src in
+        let store_code = s_operand ctx t1 dst in
+        free_temp_reg t1;
+        load_code ^ store_code
+
+    | Call (dst, fname, args) ->
+        let args_code =
+          List.mapi
+            (fun i arg ->
+              if i < 8 then
+                l_operand ctx (Printf.sprintf "a%d" i) arg
+              else
+                let t1 = get_temp_reg () in
+                let offset = (i - 8) * 4 in
+                let load_arg = l_operand ctx t1 arg in
+                let store_arg = Printf.sprintf "\tsw %s, %d(sp)\n" t1 offset in
+                free_temp_reg t1;
+                load_arg ^ store_arg)
+            args
+          |> String.concat ""
+        in
+        let call_code = Printf.sprintf "\tcall %s\n" fname in
+        let save_result =
+          match dst with
+          | Reg r | Var r -> s_operand ctx "a0" dst
+          | _ -> ""
+        in
+        args_code ^ call_code ^ save_result
+
+    | Ret None -> "\tj .Lret_%s\n" (* 跳转到函数末尾的统一返回点 *)
+    | Ret (Some op) ->
+        let load_ret = l_operand ctx "a0" op in
+        load_ret ^ "\tj .Lret_%s\n"
+
+    | Goto label -> Printf.sprintf "\tj %s\n" label
+    | IfGoto (cond, label) ->
+        let t1 = get_temp_reg () in
+        let load_cond = l_operand ctx t1 cond in
+        let branch_code = Printf.sprintf "\tbnez %s, %s\n" t1 label in
+        free_temp_reg t1;
+        load_cond ^ branch_code
+        
+    | Label label -> Printf.sprintf "%s:\n" label
+    | Load _ | Store _ -> " # Load/Store not implemented in this simplified version\n"
+  in
+
+  (* 编译一个基本块 *)
+  let com_block (blk : ir_block) : string =
+    let inst_codes = List.map com_inst blk.insts |> String.concat "" in
+    let term_code =
+      match blk.terminator with
+      | TermGoto l -> Printf.sprintf "\tj %s\n" l
+      | TermIf (cond, l1, l2) ->
+          let t1 = get_temp_reg () in
+          let load_cond = l_operand ctx t1 cond in
+          let branch_code = Printf.sprintf "\tbnez %s, %s\n" t1 l1 in
+          free_temp_reg t1;
+          load_cond ^ branch_code ^ Printf.sprintf "\tj %s\n" l2
+      | TermRet None -> "\tj .Lret_%s\n" (* 跳转到统一返回点 *)
+      | TermRet (Some op) ->
+          let load_ret = l_operand ctx "a0" op in
+          load_ret ^ "\tj .Lret_%s\n"
+      | TermSeq l -> Printf.sprintf "\tj %s\n" l (* 顺序块，直接跳转 *)
+    in
+    Printf.sprintf "%s:\n" blk.label ^ inst_codes ^ term_code
+  in
+
   (* 1. 函数头部 (Prologue) *)
   let prologue = Printf.sprintf "
 .globl %s
@@ -284,7 +275,6 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
             if i < 8 then
               Printf.sprintf "\tsw a%d, %d(fp)\n" i offset
             else
-              (* 参数在调用者的栈上传递, sp+x *)
               let caller_offset = (i - 8) * 4 in
               Printf.sprintf "\tlw t0, %d(fp)\n\tsw t0, %d(fp)\n" (ctx.stack_size + caller_offset) offset
         | Register _ -> failwith "Args should be on stack at start")
@@ -295,13 +285,13 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
   (* 3. 编译函数体 *)
   let body_code =
     if is_optimized then
-      List.map (com_block ctx) f_blocks
+      List.map com_block f_blocks
       |> String.concat ""
-      |> Printf.sprintf_replace ~search:".Lret_%s" ~replace:(".Lret_" ^ f_name)
+      |> Str.global_replace (Str.regexp_string ".Lret_%s") (".Lret_" ^ f_name)
     else
-      List.map (com_inst ctx) f_body
+      List.map com_inst f_body
       |> String.concat ""
-      |> Printf.sprintf_replace ~search:".Lret_%s" ~replace:(".Lret_" ^ f_name)
+      |> Str.global_replace (Str.regexp_string ".Lret_%s") (".Lret_" ^ f_name)
   in
 
   (* 4. 函数尾声 (Epilogue) *)
