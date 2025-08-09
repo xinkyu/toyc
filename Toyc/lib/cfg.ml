@@ -112,7 +112,12 @@ let process_inst env inst =
       Store (addr', value'), env
 
   | IfGoto (cond, label) ->
-      IfGoto (eval_operand env cond, label), env
+      let cond' = eval_operand env cond in
+      (* 增强常量折叠: 如果条件是常量，可以直接决定跳转 *)
+      (match cond' with
+       | Imm 0 -> Goto "__dead_code", env  (* 条件为假，永不跳转 *)
+       | Imm _ -> Goto label, env          (* 条件为真，总是跳转 *)
+       | _ -> IfGoto (cond', label), env)
 
   | Ret op_opt ->
       Ret (Option.map (eval_operand env) op_opt), env
@@ -121,7 +126,13 @@ let process_inst env inst =
 
 let process_terminator env term =
   match term with
-  | TermIf (cond, l1, l2) -> TermIf (eval_operand env cond, l1, l2)
+  | TermIf (cond, l1, l2) -> 
+      let cond' = eval_operand env cond in
+      (* 增强的常量条件处理 *)
+      (match cond' with
+       | Imm 0 -> TermGoto l2  (* 条件恒为假，直接跳转到 else 分支 *)
+       | Imm _ -> TermGoto l1  (* 条件恒为真，直接跳转到 then 分支 *)
+       | _ -> TermIf (cond', l1, l2))
   | TermRet o -> TermRet (Option.map (eval_operand env) o)
   | TermGoto _ | TermSeq _ as t -> t
 
@@ -170,6 +181,7 @@ let build_cfg (blocks : ir_block list) : ir_block list =
   ) reachable;
   reachable
 
+(* 增强的常量传播，更好地处理分支 *)
 let constant_propagation (blocks : ir_block list) : ir_block list =
   let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
   let in_envs = ref StringMap.empty in
@@ -204,5 +216,69 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
   done;
   blocks
 
+(* 新增: 合并基本块 - 消除跳转到跳转的链 *)
+let merge_blocks (blocks : ir_block list) : ir_block list =
+  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
+  
+  (* 找到一个标签的最终目标（跟随跳转链） *)
+  let rec find_target label visited =
+    if List.mem label visited then label (* 防止循环 *)
+    else
+      match StringMap.find_opt label block_map with
+      | Some blk -> 
+          (match blk.terminator with
+           | TermGoto target when blk.insts = [] -> 
+               find_target target (label :: visited)
+           | _ -> label)
+      | None -> label
+  in
+  
+  (* 更新所有跳转，使其直接跳到最终目标 *)
+  List.iter (fun blk ->
+    match blk.terminator with
+    | TermGoto label -> 
+        let final_target = find_target label [] in
+        if final_target <> label then
+          blk.terminator <- TermGoto final_target
+    | TermIf (cond, then_label, else_label) ->
+        let final_then = find_target then_label [] in
+        let final_else = find_target else_label [] in
+        if final_then <> then_label || final_else <> else_label then
+          blk.terminator <- TermIf (cond, final_then, final_else)
+    | TermSeq label ->
+        let final_target = find_target label [] in
+        if final_target <> label then
+          blk.terminator <- TermSeq final_target
+    | _ -> ()
+  ) blocks;
+  
+  (* 重建CFG，清理不可达块 *)
+  build_cfg blocks
+
+(* 新增: 简化冗余条件判断 *)
+let simplify_conditions (blocks : ir_block list) : ir_block list =
+  List.iter (fun blk ->
+    match blk.terminator with
+    | TermIf (_, then_label, else_label) when then_label = else_label ->
+        (* 如果分支相同，直接替换为跳转 *)
+        blk.terminator <- TermGoto then_label
+    | TermIf (Imm 0, _, else_label) ->
+        (* 条件永远为假 *)
+        blk.terminator <- TermGoto else_label
+    | TermIf (Imm _, then_label, _) ->
+        (* 条件永远为真 *)
+        blk.terminator <- TermGoto then_label
+    | _ -> ()
+  ) blocks;
+  
+  (* 重建CFG，清理不可达块 *)
+  build_cfg blocks
+
+(* 增强的优化流程 *)
 let optimize blocks =
-  blocks |> build_cfg |> constant_propagation
+  blocks 
+  |> build_cfg 
+  |> constant_propagation 
+  |> simplify_conditions
+  |> merge_blocks
+  |> build_cfg  (* 最后再次构建CFG，确保清理所有不可达块 *)
