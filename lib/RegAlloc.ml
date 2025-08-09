@@ -183,7 +183,7 @@ let allocate_registers (intervals: live_interval list) =
   (!allocation_map, !stack_offset)
 
 (*******************************************************************)
-(** 主入口函数                            **)
+(** 主入口函数**)
 (*******************************************************************)
 
 let run (blocks: ir_block list) : (allocation StringMap.t * int) =
