@@ -1,5 +1,7 @@
 (library
- (name compilerlib))
+ (name compilerlib)
+ ;; 在库中添加 liveness 和 regAlloc 模块
+ (modules ast astToIR cfg ir liveness regAlloc print_ast print_ir IrToAsm))
 
 (rule
  (targets parser.ml parser.mli parser.output)
