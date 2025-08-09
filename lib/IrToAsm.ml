@@ -1,210 +1,144 @@
+(* file: lib/IrToAsm.ml *)
+
 open Ir
+open Regalloc
 
-let stack_offset = ref 0
-let v_env = Hashtbl.create 1600
+let callee_saved = ["s0";"s1";"s2";"s3";"s4";"s5";"s6";"s7";"s8";"s9";"s10";"s11"]
 
-let get_sto var =
-  try Hashtbl.find v_env var
-  with Not_found -> failwith ("Unknown variable: " ^ var)
+(* 生成汇编代码的核心，处理一个分配好的函数 *)
+let com_func_alloc (f : allocated_func) : string =
+  let alloc_map = f.alloc_map in
+  let final_stack_size = ref f.stack_size in
 
-(* 变量是否已经在符号表里面了, 存在则直接返回偏移, 否则分配新偏移 *)
-let all_st var =
-  try get_sto var
-  with _ ->
-    stack_offset := !stack_offset + 4;
-    Hashtbl.add v_env var !stack_offset;
-    !stack_offset
+  (* 找出所有使用到的 callee-saved 寄存器 *)
+  let used_callee_saved =
+    List.filter (fun r ->
+      StringMap.exists (fun _ alloc ->
+        match alloc with InReg reg when reg = r -> true | _ -> false
+      ) alloc_map
+    ) callee_saved
+  in
+  final_stack_size := !final_stack_size + (List.length used_callee_saved * 4) + 4; (* +4 for ra *)
 
-let operand_str = function
-  | Reg r | Var r -> Printf.sprintf "%d(sp)" (get_sto r)
-  | Imm i -> Printf.sprintf "%d" i
+  (* 确保栈帧大小是 16 字节对齐的 *)
+  if !final_stack_size mod 16 <> 0 then
+    final_stack_size := !final_stack_size + (16 - (!final_stack_size mod 16));
 
-let l_operand (reg : string) (op : operand) : string =
-  match op with
-  | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
-  | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
-
-let com_inst (inst : ir_inst) : string =
-  match inst with
-  | Binop (op, dst, lhs, rhs) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let lhs_code = l_operand "t1" lhs in
-      let rhs_code = l_operand "t2" rhs in
-      let op_code =
-        match op with
-        | "+" -> "\tadd t0, t1, t2\n"
-        | "-" -> "\tsub t0, t1, t2\n"
-        | "*" -> "\tmul t0, t1, t2\n"
-        | "/" -> "\tdiv t0, t1, t2\n"
-        | "%" -> "\trem t0, t1, t2\n"
-        | "==" -> "\tsub t0, t1, t2\n\tseqz t0, t0\n"
-        | "!=" -> "\tsub t0, t1, t2\n\tsnez t0, t0\n"
-        | "<=" -> "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
-        | ">=" -> "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
-        | "<" -> "\tslt t0, t1, t2\n"
-        | ">" -> "\tsgt t0, t1, t2\n"
-        | "&&" -> "\tand t0, t1, t2\n"
-        | "||" -> "\tor t0, t1, t2\n"
-        | _ -> failwith ("Unknown binop: " ^ op)
-      in
-      lhs_code ^ rhs_code ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  | Unop (op, dst, src) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let load_src = l_operand "t1" src in
-      let op_code =
-        match op with
-        | "-" -> "\tneg t0, t1\n"
-        | "!" -> "\tseqz t0, t1\n"
-        | "+" -> "\tmv t0, t1\n"
-        | _ -> failwith ("Unknown unop: " ^ op)
-      in
-      load_src ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  | Assign (dst, src) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let load_src = l_operand "t0" src in
-      load_src ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  (* Not used *)
-  | Load (dst, src) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let src_code = l_operand "t1" src in
-      src_code ^ "\tlw t0, 0(t1)\n" ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  (* Not used *)
-  | Store (dst, src) ->
-      let dst_code = l_operand "t1" dst in
-      let src_code = l_operand "t2" src in
-      dst_code ^ src_code ^ "\tsw t2, 0(t1)\n"
-  | Call (dst, fname, args) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let args_code =
-        List.mapi
-          (fun i arg ->
-            if i < 8 then l_operand (Printf.sprintf "a%d" i) arg
-            else
-              let offset = 4 * (i - 8) in
-              l_operand "t0" arg ^ Printf.sprintf "\tsw t0, %d(sp)\n" (-1600 - offset))
-          args
-        |> String.concat ""
-      in
-      args_code ^ Printf.sprintf "\tcall %s\n\tsw a0, %d(sp)\n" fname dst_off
-  | Ret None ->
-      let ra_offset = get_sto "ra" in
-      Printf.sprintf
-        "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-        ra_offset
-  | Ret (Some op) ->
-      let load_code = l_operand "a0" op in
-      let ra_offset = get_sto "ra" in
-      load_code
-      ^ Printf.sprintf
-          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-          ra_offset
-  | Goto label -> Printf.sprintf "\tj %s\n" label
-  | IfGoto (cond, label) ->
-      let cond_code = l_operand "t0" cond in
-      cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
-  | Label label -> Printf.sprintf "%s:\n" label
-
-let com_block (blk : ir_block) : string =
-  blk.insts |> List.map com_inst |> String.concat ""
-
-let com_func (f : ir_func) : string =
-  Hashtbl.clear v_env;
-  stack_offset := 0;
-
-  (* 参数入栈 *)
-  let pae_set =
-    List.mapi
-      (fun i name ->
-        let off = all_st name in
-        if i < 8 then Printf.sprintf "\tsw a%d, %d(sp)\n" i off
-        else
-          Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
-            (* offset 为 call 语句将第 i 个参数压入的偏移 *)
-            (-4 * (i - 8))
-            off)
-      f.args
-    |> String.concat ""
+  (* 辅助函数：加载一个操作数到指定的物理寄存器 (e.g., t0, t1) *)
+  let load_operand target_reg op =
+    match op with
+    | Imm i -> Printf.sprintf "\tli %s, %d\n" target_reg i
+    | Reg v | Var v ->
+        match StringMap.find v alloc_map with
+        | InReg r -> if r <> target_reg then Printf.sprintf "\tmv %s, %s\n" target_reg r else ""
+        | OnStack offset -> Printf.sprintf "\tlw %s, %d(sp)\n" target_reg offset
   in
 
-  (* ra 入栈 *)
-  let pae_set =
-    pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra")
+  (* 辅助函数：将一个物理寄存器 (e.g., t0) 的值存回操作数的目标位置 *)
+  let store_operand source_reg op =
+    match op with
+    | Imm _ -> failwith "Cannot store to an immediate"
+    | Reg v | Var v ->
+        match StringMap.find v alloc_map with
+        | InReg r -> if r <> source_reg then Printf.sprintf "\tmv %s, %s\n" r source_reg else ""
+        | OnStack offset -> Printf.sprintf "\tsw %s, %d(sp)\n" source_reg offset
   in
 
-  let body_code = f.body |> List.map com_inst |> String.concat "" in
-
-  let body_code =
-    if not (String.ends_with ~suffix:"\tret\n" body_code) then
-      body_code
-      ^ Printf.sprintf
-          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-          (get_sto "ra")
-    else body_code
-  in
-  let func_label = f.name in
-  let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -1600\n" func_label in
-  prologue ^ pae_set ^ body_code
-
-let com_func_o (f : ir_func_o) : string =
-  Hashtbl.clear v_env;
-  stack_offset := 0;
-
-  let pae_set =
-    List.mapi
-      (fun i name ->
-        let off = all_st name in
-        if i < 8 then Printf.sprintf "\tsw a%d, %d(sp)\n" i off
-        else
-          Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
-            (* offset 为 call 语句将第 i 个参数压入的偏移 *)
-            (-4 * (i - 8))
-            off)
-      f.args
-    |> String.concat ""
+  (* --- 函数序言 --- *)
+  let prologue =
+    let stack_alloc = Printf.sprintf "\taddi sp, sp, -%d\n" !final_stack_size in
+    let ra_offset = !final_stack_size - 4 in
+    let save_ra = Printf.sprintf "\tsw ra, %d(sp)\n" ra_offset in
+    let save_callee =
+      List.mapi (fun i r ->
+        let offset = ra_offset - 4 * (i + 1) in
+        Printf.sprintf "\tsw %s, %d(sp)\n" r offset
+      ) used_callee_saved |> String.concat ""
+    in
+    Printf.sprintf "%s:\n" f.name ^ stack_alloc ^ save_ra ^ save_callee
   in
 
-  (* ra 入栈 *)
-  let pae_set =
-    pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra")
+  (* --- 函数体 --- *)
+  let body =
+    let insts_asm =
+      List.map (fun (b: ir_block) ->
+        let block_label = Printf.sprintf "%s:\n" b.label in
+        let insts_code =
+          List.map (fun inst ->
+            match inst with
+            | Binop (op, dst, lhs, rhs) ->
+                let op_str = match op with
+                  | "+" -> "add" | "-" -> "sub" | "*" -> "mul" | "/" -> "div" | "%" -> "rem"
+                  | "==" -> "seqz" | "!=" -> "snez" | "<" -> "slt" | ">" -> "sgt"
+                  | "<=" -> "sgt" (* x<=y is !(y<x) *) | ">=" -> "slt" (* x>=y is !(x<y) *)
+                  | _ -> failwith ("unsupported binop: " ^ op)
+                in
+                let code = load_operand "t1" lhs ^ load_operand "t2" rhs in
+                if List.mem op ["=="; "!="; "<"; ">"] then
+                    let sub_op = if op ==">" || op =="<" then "sub" else "sub" in (* dummy *)
+                    let real_op = if op==">" || op=="<" then op_str else "sub" in
+                    let final_op = if op=="==" || op=="!=" then op_str else "" in
+                    let t0_op = if op==">" || op=="<" then Printf.sprintf "\t%s t0, t1, t2\n" real_op else Printf.sprintf "\tsub t0, t1, t2\n\t%s t0, t0\n" op_str in
+                     code ^ t0_op ^ (store_operand "t0" dst)
+                else if List.mem op ["<="; ">="] then
+                    let swapped_lhs, swapped_rhs = if op = "<=" then ("t1", "t2") else ("t2", "t1") in
+                    let slt_op = Printf.sprintf "\tsgt t0, %s, %s\n" swapped_lhs swapped_rhs in
+                    let xori_op = "\txori t0, t0, 1\n" in
+                    code ^ slt_op ^ xori_op ^ (store_operand "t0" dst)
+                else
+                    code ^ Printf.sprintf "\t%s t0, t1, t2\n" op_str ^ store_operand "t0" dst
+            | Unop (op, dst, src) ->
+                let op_str = match op with "-" -> "neg" | "!" -> "seqz" | "+" -> "mv" | _ -> failwith op in
+                load_operand "t1" src ^ Printf.sprintf "\t%s t0, t1\n" op_str ^ store_operand "t0" dst
+            | Assign (dst, src) -> load_operand "t0" src ^ store_operand "t0" dst
+            | Call (dst, fname, args) ->
+                let args_setup =
+                  List.mapi (fun i arg ->
+                    if i < 8 then load_operand (Printf.sprintf "a%d" i) arg
+                    else failwith "stack arguments not implemented yet"
+                  ) args |> String.concat ""
+                in
+                args_setup ^ Printf.sprintf "\tcall %s\n" fname ^ store_operand "a0" dst
+            | Goto l -> Printf.sprintf "\tj %s\n" l
+            | IfGoto (cond, l) -> load_operand "t0" cond ^ Printf.sprintf "\tbnez t0, %s\n" l
+            | Label l -> "" (* Label is handled at block level *)
+            | Ret (Some op) -> load_operand "a0" op
+            | Ret None -> ""
+            | _ -> "## unhandled inst ##\n"
+          ) b.insts |> String.concat ""
+        in
+        let term_code = match b.terminator with
+          | TermGoto l -> Printf.sprintf "\tj %s\n" l
+          | TermIf (cond, l1, l2) -> load_operand "t0" cond ^ Printf.sprintf "\tbnez t0, %s\n\tj %s\n" l1 l2
+          | TermRet _ -> "" (* Return value already loaded *)
+          | TermSeq l -> "" (* Fallthrough *)
+        in
+        block_label ^ insts_code ^ term_code
+      ) f.blocks |> String.concat ""
+    in
+    prologue ^ insts_asm
   in
 
-  let body_code = f.blocks |> List.map com_block |> String.concat "" in
-
-  (* 检查 body_code 是否以 ret 结束; 没有默认添加 "\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n" 语句; 其实可以前移到 IR 阶段 *)
-  let body_code =
-    if not (String.ends_with ~suffix:"\tret\n" body_code) then
-      body_code
-      ^ Printf.sprintf
-          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-          (get_sto "ra")
-    else body_code
+  (* --- 函数尾声 --- *)
+  let epilogue =
+    let ra_offset = !final_stack_size - 4 in
+    let restore_ra = Printf.sprintf "\tlw ra, %d(sp)\n" ra_offset in
+    let restore_callee =
+      List.mapi (fun i r ->
+        let offset = ra_offset - 4 * (i + 1) in
+        Printf.sprintf "\tlw %s, %d(sp)\n" r offset
+      ) used_callee_saved |> String.concat ""
+    in
+    let stack_dealloc = Printf.sprintf "\taddi sp, sp, %d\n" !final_stack_size in
+    restore_callee ^ restore_ra ^ stack_dealloc ^ "\tret\n"
   in
+  body ^ epilogue
 
-  let func_label = f.name in
-  let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -1600\n" func_label in
-  prologue ^ pae_set ^ body_code
 
 let com_pro (prog : ir_program) : string =
-  let prologue = ".text\n .global main\n" in
-  let body_asm =
-    match prog with
-    | Ir_funcs funcs -> List.map com_func funcs |> String.concat "\n"
-    | Ir_funcs_o funcs_o ->
-        List.map com_func_o funcs_o |> String.concat "\n"
+  let header = ".text\n.global main\n" in
+  let funcs_asm = match prog with
+    | Ir_funcs_alloc funcs -> List.map com_func_alloc funcs |> String.concat "\n"
+    | _ -> failwith "Cannot generate assembly for non-allocated IR"
   in
-  prologue ^ body_asm
+  header ^ funcs_asm

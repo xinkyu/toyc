@@ -1,40 +1,32 @@
-(* file: ir.ml *)
+(* file: lib/ir.ml *)
 
-(* StringSet 模块现在在这里定义 *)
 module StringSet = Set.Make(String)
+module StringMap = Map.Make(String)
 
 type operand =
-  | Reg of string (* 临时寄存器 *)
-  | Imm of int (* 立即数 *)
-  | Var of string (* 变量名 *)
-  [@@deriving show]
+  | Reg of string
+  | Imm of int
+  | Var of string
 
 type ir_inst =
-  | Binop of string * operand * operand * operand (* t1 = t2 + t3 *)
-  | Unop of string * operand * operand (* t1 = -t2 *)
-  | Load of operand * operand (* t1 = *t2 *)
-  | Store of operand * operand (* *t1 = t2 *)
-  | Goto of string (* 优化的 IR 没有 *)
-  | IfGoto of operand * string (* 优化的 IR 没有 *)
-  | Label of string (* 优化的 IR 没有 *)
+  | Binop of string * operand * operand * operand
+  | Unop of string * operand * operand
+  | Load of operand * operand
+  | Store of operand * operand
+  | Goto of string
+  | IfGoto of operand * string
+  | Label of string
   | Call of operand * string * operand list
-  (* 优化后的 IR 没有 *)
-  (* t1 = call f(args) *)
-  | Ret of operand option (* 优化后的 IR 没有 *)
-  | Assign of operand * operand (* t1 = t2 *)
-  [@@deriving show]
+  | Ret of operand option
+  | Assign of operand * operand
 
 type ir_func = { name : string; args : string list; body : ir_inst list }
-[@@deriving show]
 
-(* 用于优化 *)
 type ir_term =
   | TermGoto of string
   | TermIf of operand * string * string
   | TermRet of operand option
   | TermSeq of string
-  (* | TermCall (* 不用管 *) *)
-  [@@deriving show]
 
 type ir_block = {
   label : string;
@@ -42,17 +34,25 @@ type ir_block = {
   mutable terminator : ir_term;
   mutable preds : string list;
   mutable succs : string list;
-  (* ---- 新增的活跃性分析字段 ---- *)
-  mutable def: StringSet.t;       (* 在本块中被定义的变量集合 *)
-  mutable use: StringSet.t;       (* 在本块中被使用的变量集合 (在定义前) *)
-  mutable live_in: StringSet.t;   (* 进入本块时的活跃变量 *)
-  mutable live_out: StringSet.t;  (* 离开本块时的活跃变量 *)
+  mutable def: StringSet.t;
+  mutable use: StringSet.t;
+  mutable live_in: StringSet.t;
+  mutable live_out: StringSet.t;
 }
-[@@deriving show]
 
-
-(* 用于 IR 优化的 func 定义 *)
 type ir_func_o = { name : string; args : string list; blocks : ir_block list }
-[@@deriving show]
-type ir_program = Ir_funcs of ir_func list | Ir_funcs_o of ir_func_o list
-[@@deriving show]
+
+(* --- 新增的类型，用于存放分配结果 --- *)
+type allocated_func = {
+  name: string;
+  args: string list;
+  blocks: ir_block list;
+  alloc_map: Regalloc.allocation StringMap.t;
+  mutable stack_size: int; (* 总栈帧大小 *)
+}
+
+(* --- 更新 ir_program 类型以包含新变体 --- *)
+type ir_program =
+  | Ir_funcs of ir_func list
+  | Ir_funcs_o of ir_func_o list
+  | Ir_funcs_alloc of allocated_func list
