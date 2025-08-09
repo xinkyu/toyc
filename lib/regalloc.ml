@@ -12,7 +12,7 @@ let arg_regs = ["a0"; "a1"; "a2"; "a3"; "a4"; "a5"; "a6"; "a7"]
 type live_interval = {
   var : string;        (* Variable name *)
   start : int;         (* Start position *)
-  ending : int;        (* End position *)
+  mutable ending : int;  (* End position - MUST BE MUTABLE *)
   mutable reg : reg option;  (* Assigned register *)
   mutable spill : bool;      (* Is spilled to memory *)
   mutable spill_loc : int option; (* Stack location if spilled *)
