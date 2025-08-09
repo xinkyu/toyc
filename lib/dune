@@ -1,7 +1,6 @@
 (library
  (name compilerlib)
- ;; FIX: Added parser and lexer to the list of modules.
- (modules ast astToIR cfg ir liveness regAlloc print_ast print_ir IrToAsm parser lexer))
+ (modules ast astToIR cfg ir IrToAsm lexer parser print_ast print_ir reg_alloc))
 
 (rule
  (targets parser.ml parser.mli parser.output)
