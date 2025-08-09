@@ -59,10 +59,6 @@ let log2 n =
 let com_inst (inst : ir_inst) : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
       let lhs_code = l_operand "t1" lhs in
       
       (* 针对乘法和除法的优化 *)
@@ -136,12 +132,10 @@ let com_inst (inst : ir_inst) : string =
           let load_src = l_operand "t0" src in
           load_src ^ s_operand dst "t0"
       
-  (* Not used *)
-  | Load (dst, src) ->
+  | Load (dst, src) ->  (* 修复这里的模式匹配 *)
       let src_code = l_operand "t1" src in
       src_code ^ "\tlw t0, 0(t1)\n" ^ s_operand dst "t0"
       
-  (* Not used *)
   | Store (dst, src) ->
       let dst_code = l_operand "t1" dst in
       let src_code = l_operand "t2" src in
@@ -229,7 +223,7 @@ let optimize_tail_recursion (f : ir_func) : ir_func =
         (* 找到尾递归调用，转换为参数赋值和跳转 *)
         let param_assigns = 
           List.mapi (fun i arg ->
-            if i < f.args |> List.length then
+            if i < List.length f.args then
               let param_name = List.nth f.args i in
               Assign (Var param_name, arg)
             else
