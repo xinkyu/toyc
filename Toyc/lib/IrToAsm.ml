@@ -24,6 +24,17 @@ let l_operand (reg : string) (op : operand) : string =
   | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
   | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
 
+(* 辅助函数：检查是否是2的幂 *)
+let is_power_of_2 n = n > 0 && (n land (n - 1)) = 0
+
+(* 辅助函数：计算log2 *)
+let log2 n =
+  let rec aux i n =
+    if n = 1 then i
+    else aux (i + 1) (n asr 1)
+  in
+  aux 0 n
+
 let com_inst (inst : ir_inst) : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
@@ -32,23 +43,36 @@ let com_inst (inst : ir_inst) : string =
           (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
       in
       let lhs_code = l_operand "t1" lhs in
-      let rhs_code = l_operand "t2" rhs in
-      let op_code =
-        match op with
-        | "+" -> "\tadd t0, t1, t2\n"
-        | "-" -> "\tsub t0, t1, t2\n"
-        | "*" -> "\tmul t0, t1, t2\n"
-        | "/" -> "\tdiv t0, t1, t2\n"
-        | "%" -> "\trem t0, t1, t2\n"
-        | "==" -> "\tsub t0, t1, t2\n\tseqz t0, t0\n"
-        | "!=" -> "\tsub t0, t1, t2\n\tsnez t0, t0\n"
-        | "<=" -> "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
-        | ">=" -> "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
-        | "<" -> "\tslt t0, t1, t2\n"
-        | ">" -> "\tsgt t0, t1, t2\n"
-        | "&&" -> "\tand t0, t1, t2\n"
-        | "||" -> "\tor t0, t1, t2\n"
-        | _ -> failwith ("Unknown binop: " ^ op)
+      let rhs_code, op_code =
+        match op, rhs with
+        | "*", Imm n when is_power_of_2 n ->
+            (* 优化：乘以2的幂用移位代替 *)
+            let shift = log2 n in
+            Printf.sprintf "\tli t2, %d\n" shift,
+            "\tsll t0, t1, t2\n"
+        | "*", _ ->
+            rhs_code = l_operand "t2" rhs,
+            "\tmul t0, t1, t2\n"
+        | "/", Imm n when is_power_of_2 n ->
+            (* 优化：除以2的幂用移位代替 *)
+            let shift = log2 n in
+            Printf.sprintf "\tli t2, %d\n" shift,
+            "\tsra t0, t1, t2\n"  (* 算术右移，保持符号 *)
+        | "/", _ ->
+            l_operand "t2" rhs,
+            "\tdiv t0, t1, t2\n"
+        | "+" -> l_operand "t2" rhs, "\tadd t0, t1, t2\n"
+        | "-" -> l_operand "t2" rhs, "\tsub t0, t1, t2\n"
+        | "%" -> l_operand "t2" rhs, "\trem t0, t1, t2\n"
+        | "==" -> l_operand "t2" rhs, "\tsub t0, t1, t2\n\tseqz t0, t0\n"
+        | "!=" -> l_operand "t2" rhs, "\tsub t0, t1, t2\n\tsnez t0, t0\n"
+        | "<=" -> l_operand "t2" rhs, "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
+        | ">=" -> l_operand "t2" rhs, "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
+        | "<" -> l_operand "t2" rhs, "\tslt t0, t1, t2\n"
+        | ">" -> l_operand "t2" rhs, "\tsgt t0, t1, t2\n"
+        | "&&" -> l_operand "t2" rhs, "\tand t0, t1, t2\n"
+        | "||" -> l_operand "t2" rhs, "\tor t0, t1, t2\n"
+        | _ -> l_operand "t2" rhs, failwith ("Unknown binop: " ^ op)
       in
       lhs_code ^ rhs_code ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
   | Unop (op, dst, src) ->
