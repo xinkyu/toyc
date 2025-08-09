@@ -4,6 +4,7 @@ open Liveness
 
 module StringMap = Map.Make(String)
 module IntMap = Map.Make(Int)
+module StringSet = Set.Make(String)
 
 type func_context = {
   alloc_map: (string, allocation_location) Hashtbl.t;
@@ -73,7 +74,6 @@ let com_inst (ctx: func_context) (inst: ir_inst) : string =
       let store_code = store_operand ctx dst t1 in
       load_code ^ store_code
   | Call (dst, fname, args) ->
-      (* FIX: Correctly get live variables after the call *)
       let live_after_call = try Hashtbl.find ctx.per_inst_live_out ctx.current_inst_id with Not_found -> StringSet.empty in
       let regs_to_save = Hashtbl.fold (fun var loc acc ->
         if StringSet.mem var live_after_call then
@@ -105,16 +105,11 @@ let com_func_o (f: ir_func_o) : string =
   let live_in, live_out = Liveness.analyze f in
   let intervals = build_intervals f live_in live_out in
   let alloc_map = linear_scan_allocate intervals in
-  let _, block_ranges = number_instructions f in
-  let spill_vars = Hashtbl.fold (fun var loc acc -> match loc with Spilled _ -> var :: acc | _ -> acc) alloc_map [] in
-  let spill_count = List.length spill_vars in
-  let frame_size = 4 * (spill_count + 1) in
-  let frame_size = if frame_size mod 16 <> 0 then frame_size + (16 - frame_size mod 16) else frame_size in
-  let var_offsets = Hashtbl.create 100 in
-  let ra_offset = frame_size - 4 in
-  List.iteri (fun i var -> Hashtbl.add var_offsets var (frame_size - 4 * (i + 2))) (List.sort String.compare spill_vars);
-  
-  (* FIX: Pre-calculate live-out set for each instruction for correct caller-save *)
+  let inst_map, block_ranges = number_instructions f in
+
+  (* FIX: Correctly identify ALL variables that need a stack slot.
+     This includes spilled variables AND any variable in a caller-saved
+     register that is live across a call. This prevents the Not_found exception. *)
   let per_inst_live_out = Hashtbl.create 100 in
   List.iter (fun b ->
       let live = ref (StringMap.find b.label live_out) in
@@ -135,15 +130,45 @@ let com_func_o (f: ir_func_o) : string =
       ) (List.rev insts_with_ids);
   ) f.blocks;
 
+  let vars_needing_stack_home = ref StringSet.empty in
+  Hashtbl.iter (fun var loc ->
+    match loc with
+    | Spilled _ -> vars_needing_stack_home := StringSet.add var !vars_needing_stack_home
+    | _ -> ()
+  ) alloc_map;
+
+  IntMap.iter (fun id inst ->
+    match inst with
+    | Call _ ->
+        let live_after = try Hashtbl.find per_inst_live_out id with Not_found -> StringSet.empty in
+        StringSet.iter (fun var ->
+          match Hashtbl.find_opt alloc_map var with
+          | Some (InReg reg) when List.mem reg caller_saved_regs ->
+              vars_needing_stack_home := StringSet.add var !vars_needing_stack_home
+          | _ -> ()
+        ) live_after
+    | _ -> ()
+  ) inst_map;
+
+  let stack_var_count = StringSet.cardinal !vars_needing_stack_home in
+  let frame_size = 4 * (stack_var_count + 1) in
+  let frame_size = if frame_size mod 16 <> 0 then frame_size + (16 - frame_size mod 16) else frame_size in
+  
+  let var_offsets = Hashtbl.create 100 in
+  let ra_offset = frame_size - 4 in
+  List.iteri (fun i var ->
+    Hashtbl.add var_offsets var (frame_size - 4 * (i + 2))
+  ) (List.sort String.compare (StringSet.elements !vars_needing_stack_home));
+
   let ctx = { alloc_map; var_offsets; per_inst_live_out; current_inst_id = -2 } in
   let prologue = Printf.sprintf "%s:\n\taddi sp, sp, %d\n\tsw ra, %d(sp)\n" f.name (-frame_size) ra_offset in
   let args_setup = List.mapi (fun i arg_name -> store_operand ctx (Var arg_name) ("a" ^ string_of_int i)) f.args |> String.concat "" in
+  
   let body_code = List.map (fun (b: ir_block) ->
-    (* FIX: Use pre-computed block_ranges for efficiency and correctness *)
     let start, _ = Hashtbl.find block_ranges b.label in
     ctx.current_inst_id <- start - 2;
     let insts_code = List.map (com_inst ctx) b.insts |> String.concat "" in
-    ctx.current_inst_id <- ctx.current_inst_id + 2; (* Advance to terminator ID *)
+    ctx.current_inst_id <- ctx.current_inst_id + 2;
     let term_code = match b.terminator with
       | TermGoto l -> Printf.sprintf "\tj %s\n" l
       | TermIf (cond, l1, l2) ->
@@ -157,6 +182,7 @@ let com_func_o (f: ir_func_o) : string =
     in
     (Printf.sprintf "%s:\n" b.label) ^ insts_code ^ term_code
   ) f.blocks |> String.concat "" in
+  
   prologue ^ args_setup ^ body_code
 
 let com_pro (prog: ir_program) : string =
