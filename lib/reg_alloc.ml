@@ -90,7 +90,7 @@ let allocate_block_registers (var_map : var_info StringMap.t) : unit =
   (* 分配寄存器 *)
   let rec allocate reg_list = function
     | [] -> ()
-    | (var, info) :: rest ->
+    | (_, info) :: rest ->  (* 修改这里，使用下划线忽略未使用的变量 *)
         match reg_list with
         | [] -> 
             (* 没有更多寄存器可用 *)
