@@ -89,7 +89,7 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
             | Div -> Imm (a / b) | Mod -> Imm (a mod b) | Eq -> Imm (if a = b then 1 else 0)
             | Neq -> Imm (if a <> b then 1 else 0) | Less -> Imm (if a < b then 1 else 0)
             | Leq -> Imm (if a <= b then 1 else 0) | Greater -> Imm (if a > b then 1 else 0)
-            | Geq -> Imm (if a >= b then 1 else 0) | Lor | Land -> Imm 0 (* Placeholder, will be handled by short-circuiting *)
+            | Geq -> Imm (if a >= b then 1 else 0) | Lor | Land -> Imm 0
           in (folded, c1 @ c2)
       | _ -> let dst = ftemp () in (dst, c1 @ c2 @ [ Binop (string_binop op, dst, lhs, rhs) ]))
   | Call (f, args) ->
@@ -202,58 +202,60 @@ let func_ir (f : func_def) : ir_func =
   let bodycode = match List.rev raw_code with | Label _ :: rest_rev -> List.rev rest_rev | _ -> raw_code in
   { name = f'.func_name; args = f'.params; body = bodycode }
 
+(* --- 全新的 pblocks 函数 --- *)
 let pblocks (insts : ir_inst list) : ir_block list =
-    let rec split acc curr label insts =
-      match insts with
-      | [] ->
-          if curr <> [] then
-            let blk = {
-              label; insts = List.rev curr; terminator = TermRet None; preds = []; succs = [];
-              def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
-            } in
-            blk :: acc |> List.rev
-          else List.rev acc
-      | Label l :: rest ->
-          let term = TermSeq l in
-          let blk = {
-            label; insts = List.rev curr; terminator = term; preds = []; succs = [];
-            def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
-          } in
-          split (blk :: acc) [] l rest
-      | Goto l :: rest ->
-          let blk = {
-            label; insts = List.rev curr; terminator = TermGoto l; preds = []; succs = [];
-            def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
-          } in
-          split (blk :: acc) [] ("DEAD_CODE_AFTER_GOTO_" ^ l) rest
+  let create_block label insts =
+    let terminator =
+      match List.rev insts with
+      | Ret op :: _ -> TermRet op
+      | Goto l :: _ -> TermGoto l
       | IfGoto (cond, l) :: rest ->
-          let next_label = "L" ^ string_of_int (labelid := !labelid + 1; !labelid) in
-          let blk = {
-            label; insts = List.rev curr; terminator = TermIf (cond, l, next_label); preds = []; succs = [];
-            def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
-          } in
-          split (blk :: acc) [] next_label rest
-      | Ret op :: rest ->
-          let blk = {
-            label; insts = List.rev curr; terminator = TermRet op; preds = []; succs = [];
-            def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
-          } in
-          split (blk :: acc) [] "DEAD_CODE_AFTER_RETURN" rest
-      | inst :: rest -> split acc (inst :: curr) label rest
+          let next_label = match rest with Label l' :: _ -> l' | _ -> flabel() in
+          TermIf (cond, l, next_label)
+      | _ -> TermRet None (* Default terminator for fallthrough or end of function *)
     in
+    let insts' =
+      match terminator with
+      | TermRet _ | TermGoto _ | TermIf _ -> List.rev (List.tl (List.rev insts))
+      | _ -> insts
+    in
+    { label; insts = insts'; terminator; preds = []; succs = [];
+      def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
+    }
+  in
+  let rec split_by_label current_blocks current_insts inst_list =
+    match inst_list with
+    | [] ->
+        if current_insts <> [] then List.rev (current_insts :: current_blocks)
+        else List.rev current_blocks
+    | Label l :: rest ->
+        let new_blocks =
+          if current_insts <> [] then List.rev current_insts :: current_blocks
+          else current_blocks
+        in
+        split_by_label new_blocks [Label l] rest
+    | inst :: rest ->
+        split_by_label current_blocks (inst :: current_insts) rest
+  in
+  let inst_groups =
     match insts with
-    | Label l :: rest -> split [] [] l rest
-    | [] -> []
-    | insts -> split [] [] "entry" insts
+    | Label _ as l -> split_by_label [] [] (l::(List.tl insts))
+    | _ -> split_by_label [] [] (Label "entry" :: insts)
+  in
+  List.map (fun group ->
+    let label = match group with Label l :: _ -> l | _ -> failwith "Block has no label" in
+    create_block label (List.rev group)
+  ) inst_groups
+
 
 let func_iro (f : func_def) : allocated_func =
+  (* Reset global counters for each function to keep labels unique *)
+  labelid := 0; irlabid := 0;
   let init_map = List.fold_left (fun m name -> Env.add name (Var name) m) Env.empty f.params in
   let ctx0 = { env_stack = ref [init_map]; break_lbl = None; continue_lbl = None } in
   let bodycode = stmt_res ctx0 (Block f.body) |> flatten in
-  let linear_ir = match List.rev bodycode with | Label _ :: rest_rev -> List.rev rest_rev | _ -> bodycode in
-  let raw_blocks = pblocks linear_ir in
+  let raw_blocks = pblocks bodycode in
   let opt_blocks = Cfg.optimize raw_blocks in
-  (* --- 修正后的调用 --- *)
   let alloc_map, spill_size = Regalloc.run opt_blocks in
   { name = f.func_name;
     args = f.params;

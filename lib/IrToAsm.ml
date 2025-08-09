@@ -4,7 +4,6 @@ open Ir
 
 let callee_saved = ["s0";"s1";"s2";"s3";"s4";"s5";"s6";"s7";"s8";"s9";"s10";"s11"]
 
-(* 修正后的版本 *)
 let com_func_alloc (f : allocated_func) : string =
   let alloc_map = f.alloc_map in
   let final_stack_size = ref f.stack_size in
@@ -66,8 +65,9 @@ let com_func_alloc (f : allocated_func) : string =
   in
 
   let body_asm =
-      List.map (fun (b: ir_block) ->
-        let block_label = Printf.sprintf "%s:\n" b.label in
+      List.mapi (fun blk_idx (b: ir_block) ->
+        (* 对函数的第一个块，不打印其标签（如entry），因为它紧跟函数名标签 *)
+        let block_label = if blk_idx = 0 then "" else Printf.sprintf "%s:\n" b.label in
         let insts_code =
           List.map (fun inst ->
             match inst with
@@ -100,17 +100,15 @@ let com_func_alloc (f : allocated_func) : string =
                 in
                 let post_call = if stack_space_for_args > 0 then Printf.sprintf "\taddi sp, sp, %d\n" stack_space_for_args else "" in
                 pre_call ^ args_setup ^ Printf.sprintf "\tcall %s\n" fname ^ post_call ^ store_operand "a0" dst
-            | Ret (Some op) -> load_operand "a0" op
-            | Ret None -> ""
-            | Label _ | Goto _ | IfGoto _ -> ""
-            | Load _ | Store _ -> "## Load/Store not fully implemented for allocated backend ##\n"
+            | _ -> "" (* Goto, IfGoto, Label, Ret are handled by terminators or block structure *)
           ) b.insts |> String.concat ""
         in
         let term_code = match b.terminator with
           | TermGoto l -> Printf.sprintf "\tj %s\n" l
           | TermIf (cond, l1, l2) -> load_operand "t0" cond ^ Printf.sprintf "\tbnez t0, %s\n\tj %s\n" l1 l2
-          | TermRet _ -> ""
-          | TermSeq _ -> ""
+          | TermRet (Some op) -> load_operand "a0" op
+          | TermRet None -> ""
+          | TermSeq l -> ""
         in
         block_label ^ insts_code ^ term_code
       ) f.blocks |> String.concat ""
