@@ -160,13 +160,16 @@ let func_ir (f : func_def) : ir_func =
   let bodycode = match List.rev raw_code with | Label _ :: rest_rev -> List.rev rest_rev | _ -> raw_code in
   { name = f'.func_name; args = f'.params; body = bodycode }
 
-(* --- 全新的、最终修正版的 pblocks 函数 --- *)
+(* file: astToIR.ml *)
+(* ... 其他函数保持不变 ... *)
+
+(* --- 最终修正版的 pblocks 函数 --- *)
 let pblocks (insts : ir_inst list) : ir_block list =
   (* Pass 1: Group instructions that belong to the same block. *)
   let rec group_by_labels current_label_insts acc insts =
     match insts with
     | [] -> List.rev (current_label_insts :: acc)
-    | (Label l) as inst :: rest ->
+    | (Label _) as inst :: rest -> (* <- 此处 l 已被替换为 _ *)
         let new_acc = if current_label_insts = [] then acc else current_label_insts :: acc in
         group_by_labels [inst] new_acc rest
     | inst :: rest ->
@@ -212,6 +215,9 @@ let pblocks (insts : ir_inst list) : ir_block list =
         process_groups (block :: acc) (next_group :: rest)
   in
   process_groups [] groups_rev
+
+(* ... 其他函数保持不变 ... *)
+ 
 
 let func_iro (f : func_def) : allocated_func =
   labelid := 0;
