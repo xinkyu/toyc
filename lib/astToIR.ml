@@ -162,63 +162,56 @@ let func_ir (f : func_def) : ir_func =
 
 (* --- 全新的、最终修正版的 pblocks 函数 --- *)
 let pblocks (insts : ir_inst list) : ir_block list =
-    (* Step 1: Create a list of instruction groups, where each group starts with a label. *)
-    let rec group acc current_group = function
-      | [] -> List.rev (current_group :: acc)
-      | Label l :: rest ->
-          let new_acc = if current_group = [] then acc else current_group :: acc in
-          group new_acc [Label l] rest
-      | inst :: rest ->
-          group acc (inst :: current_group) rest
-    in
-    let insts' = match insts with
-      | Label _ :: _ -> insts
-      | _ -> Label "entry" :: insts
-    in
-    let groups_rev = group [] [] insts' in
+  (* Pass 1: Group instructions that belong to the same block. *)
+  let rec group_by_labels current_label_insts acc insts =
+    match insts with
+    | [] -> List.rev (current_label_insts :: acc)
+    | (Label l) as inst :: rest ->
+        let new_acc = if current_label_insts = [] then acc else current_label_insts :: acc in
+        group_by_labels [inst] new_acc rest
+    | inst :: rest ->
+        group_by_labels (inst :: current_label_insts) acc rest
+  in
+  let initial_insts = match insts with
+    | Label _ :: _ -> insts
+    | _ -> Label "entry" :: insts
+  in
+  let groups_rev = group_by_labels [] [] initial_insts in
 
-    (* Step 2: Create a temporary map of labels to instruction lists. *)
-    let block_map =
-      List.fold_left (fun map group_rev ->
-        match List.rev group_rev with
-        | Label l :: insts -> StringMap.add l insts map
-        | _ -> map
-      ) StringMap.empty groups_rev
-    in
-    let block_labels = List.map (fun g -> match List.rev g with Label l :: _ -> l | _ -> "") groups_rev in
-
-    (* Step 3: Iterate through the labels to build blocks, determining terminators by looking ahead. *)
-    let rec build_blocks = function
-      | [] -> []
-      | [label] -> (* Last block *)
-          let insts = StringMap.find label block_map in
-          let terminator = match List.rev insts with
-            | Ret op :: _ -> TermRet op
-            | Goto l :: _ -> TermGoto l
-            | IfGoto _ :: _ -> failwith "IfGoto cannot be the last inst of a function"
-            | _ -> TermRet None
-          in
-          let final_insts = match List.rev insts with
-            | Ret _ :: r | Goto _ :: r | IfGoto _ :: r -> List.rev r
-            | _ -> insts
-          in
-          [{label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty}]
-      | label :: (next_label :: rest) ->
-          let insts = StringMap.find label block_map in
-          let terminator = match List.rev insts with
-            | Ret op :: _ -> TermRet op
-            | Goto l :: _ -> TermGoto l
-            | IfGoto (cond, l) :: _ -> TermIf (cond, l, next_label)
-            | _ -> TermSeq next_label
-          in
-          let final_insts = match List.rev insts with
-            | Ret _ :: r | Goto _ :: r | IfGoto _ :: r -> List.rev r
-            | _ -> insts
-          in
-          let block = {label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty} in
-          block :: build_blocks (next_label :: rest)
-    in
-    build_blocks block_labels
+  (* Pass 2: Convert groups into ir_block records, determining terminators. *)
+  let rec process_groups acc = function
+    | [] -> List.rev acc
+    | [group] -> (* Last block *)
+        let label, insts = match group with Label l :: i -> l, i | _ -> failwith "pblocks: group must start with a label" in
+        let terminator = match List.rev insts with
+          | Ret op :: _ -> TermRet op
+          | Goto l :: _ -> TermGoto l
+          | IfGoto _ :: _ -> failwith "pblocks: IfGoto cannot be last instruction of a function"
+          | _ -> TermRet None
+        in
+        let final_insts = match List.rev insts with
+          | Ret _ :: r | Goto _ :: r -> List.rev r
+          | _ -> insts
+        in
+        let block = { label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty } in
+        List.rev (block :: acc)
+    | group :: (next_group :: rest) ->
+        let label, insts = match group with Label l :: i -> l, i | _ -> failwith "pblocks: group must start with a label" in
+        let next_label = match next_group with Label l :: _ -> l | _ -> failwith "pblocks: next group has no label" in
+        let terminator = match List.rev insts with
+          | Ret op :: _ -> TermRet op
+          | Goto l :: _ -> TermGoto l
+          | IfGoto (cond, target) :: _ -> TermIf (cond, target, next_label)
+          | _ -> TermSeq next_label
+        in
+        let final_insts = match List.rev insts with
+          | Ret _ :: r | Goto _ :: r | IfGoto _ :: r -> List.rev r
+          | _ -> insts
+        in
+        let block = { label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty } in
+        process_groups (block :: acc) (next_group :: rest)
+  in
+  process_groups [] groups_rev
 
 let func_iro (f : func_def) : allocated_func =
   labelid := 0;

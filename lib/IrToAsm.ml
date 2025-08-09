@@ -2,7 +2,8 @@
 
 open Ir
 
-let callee_saved = ["s0";"s1";"s2";"s3";"s4";"s5";"s6";"s7";"s8";"s9";"s10";"s11"]
+let callee_saved = ["s1";"s2";"s3";"s4";"s5";"s6";"s7";"s8";"s9";"s10";"s11"]
+let frame_pointer = "s0"
 
 let com_func_alloc (f : allocated_func) : string =
   let alloc_map = f.alloc_map in
@@ -16,7 +17,8 @@ let com_func_alloc (f : allocated_func) : string =
     ) alloc_map [] |> List.sort_uniq compare
   in
   let callee_saved_size = List.length used_callee_saved * 4 in
-  final_stack_size := !final_stack_size + callee_saved_size + 4;
+  (* Space for ra, old fp, and callee-saved registers *)
+  final_stack_size := !final_stack_size + callee_saved_size + 8;
 
   if !final_stack_size mod 16 <> 0 then
     final_stack_size := !final_stack_size + (16 - (!final_stack_size mod 16));
@@ -27,7 +29,7 @@ let com_func_alloc (f : allocated_func) : string =
     | Reg v | Var v ->
         (match StringMap.find_opt v alloc_map with
         | Some (InReg r) -> if r <> target_reg then Printf.sprintf "\tmv %s, %s\n" target_reg r else ""
-        | Some (OnStack offset) -> Printf.sprintf "\tlw %s, %d(sp)\n" target_reg offset
+        | Some (OnStack offset) -> Printf.sprintf "\tlw %s, %d(%s)\n" target_reg offset frame_pointer
         | None -> "")
   in
 
@@ -37,18 +39,18 @@ let com_func_alloc (f : allocated_func) : string =
     | Reg v | Var v ->
         (match StringMap.find_opt v alloc_map with
         | Some (InReg r) -> if r <> source_reg then Printf.sprintf "\tmv %s, %s\n" r source_reg else ""
-        | Some (OnStack offset) -> Printf.sprintf "\tsw %s, %d(sp)\n" source_reg offset
+        | Some (OnStack offset) -> Printf.sprintf "\tsw %s, %d(%s)\n" source_reg offset frame_pointer
         | None -> "")
   in
 
   let prologue =
-    let stack_alloc = if !final_stack_size > 0 then Printf.sprintf "\taddi sp, sp, -%d\n" !final_stack_size else "" in
-    let ra_offset = !final_stack_size - 4 in
-    let save_ra = if !final_stack_size > 0 then Printf.sprintf "\tsw ra, %d(sp)\n" ra_offset else "" in
+    let stack_alloc = Printf.sprintf "\taddi sp, sp, -%d\n" !final_stack_size in
+    let save_ra = Printf.sprintf "\tsw ra, %d(sp)\n" (!final_stack_size - 4) in
+    let save_fp = Printf.sprintf "\tsw %s, %d(sp)\n" frame_pointer (!final_stack_size - 8) in
+    let set_fp = Printf.sprintf "\taddi %s, sp, %d\n" frame_pointer !final_stack_size in
     let save_callee =
       List.mapi (fun i r ->
-        let offset = ra_offset - 4 * (i + 1) in
-        Printf.sprintf "\tsw %s, %d(sp)\n" r offset
+        Printf.sprintf "\tsw %s, %d(sp)\n" r (!final_stack_size - 12 - (i * 4))
       ) used_callee_saved |> String.concat ""
     in
     let setup_params =
@@ -56,12 +58,12 @@ let com_func_alloc (f : allocated_func) : string =
             if i < 8 then
                 store_operand (Printf.sprintf "a%d" i) (Var arg_name)
             else
-                let arg_offset_from_fp = !final_stack_size + 4 * (i - 8) in
-                let load_from_caller_stack = Printf.sprintf "\tlw t0, %d(sp)\n" arg_offset_from_fp in
+                let arg_offset_from_fp = 4 * (i - 8) + 4 in (* +4 to skip ra on caller's frame *)
+                let load_from_caller_stack = Printf.sprintf "\tlw t0, %d(%s)\n" arg_offset_from_fp frame_pointer in
                 load_from_caller_stack ^ store_operand "t0" (Var arg_name)
         ) f.args |> String.concat ""
     in
-    Printf.sprintf "%s:\n" f.name ^ stack_alloc ^ save_ra ^ save_callee ^ setup_params
+    Printf.sprintf "%s:\n" f.name ^ stack_alloc ^ save_ra ^ save_fp ^ set_fp ^ save_callee ^ setup_params
   in
 
   let body_asm =
@@ -89,16 +91,12 @@ let com_func_alloc (f : allocated_func) : string =
                 load_operand "t1" src ^ Printf.sprintf "\t%s t0, t1\n" op_str ^ store_operand "t0" dst
             | Assign (dst, src) -> load_operand "t0" src ^ store_operand "t0" dst
             | Call (dst, fname, args) ->
-                let n_args_on_stack = max 0 (List.length args - 8) in
-                let stack_space_for_args = n_args_on_stack * 4 in
-                let pre_call = if stack_space_for_args > 0 then Printf.sprintf "\taddi sp, sp, -%d\n" stack_space_for_args else "" in
                 let args_setup = List.mapi (fun i arg ->
                     if i < 8 then load_operand (Printf.sprintf "a%d" i) arg
                     else let offset = (i - 8) * 4 in load_operand "t0" arg ^ Printf.sprintf "\tsw t0, %d(sp)\n" offset
                   ) args |> String.concat ""
                 in
-                let post_call = if stack_space_for_args > 0 then Printf.sprintf "\taddi sp, sp, %d\n" stack_space_for_args else "" in
-                pre_call ^ args_setup ^ Printf.sprintf "\tcall %s\n" fname ^ post_call ^ store_operand "a0" dst
+                args_setup ^ Printf.sprintf "\tcall %s\n" fname ^ store_operand "a0" dst
             | _ -> ""
           ) b.insts |> String.concat ""
         in
@@ -114,19 +112,15 @@ let com_func_alloc (f : allocated_func) : string =
   in
 
   let epilogue =
-    if !final_stack_size > 0 then
-      let ra_offset = !final_stack_size - 4 in
-      let restore_ra = Printf.sprintf "\tlw ra, %d(sp)\n" ra_offset in
-      let restore_callee =
-        List.mapi (fun i r ->
-          let offset = ra_offset - 4 * (i + 1) in
-          Printf.sprintf "\tlw %s, %d(sp)\n" r offset
-        ) used_callee_saved |> String.concat ""
-      in
-      let stack_dealloc = Printf.sprintf "\taddi sp, sp, %d\n" !final_stack_size in
-      restore_callee ^ restore_ra ^ stack_dealloc ^ "\tret\n"
-    else
-      "\tret\n"
+    let restore_callee =
+      List.mapi (fun i r ->
+        Printf.sprintf "\tlw %s, %d(sp)\n" r (!final_stack_size - 12 - (i * 4))
+      ) used_callee_saved |> String.concat ""
+    in
+    let restore_ra = Printf.sprintf "\tlw ra, %d(sp)\n" (!final_stack_size - 4) in
+    let restore_fp = Printf.sprintf "\tlw %s, %d(sp)\n" frame_pointer (!final_stack_size - 8) in
+    let stack_dealloc = Printf.sprintf "\taddi sp, sp, %d\n" !final_stack_size in
+    restore_callee ^ restore_ra ^ restore_fp ^ stack_dealloc ^ "\tret\n"
   in
   prologue ^ body_asm ^ epilogue
 
