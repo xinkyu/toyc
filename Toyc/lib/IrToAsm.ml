@@ -14,7 +14,9 @@ let available_regs = [
 let reg_pool = ref available_regs
 let stack_offset = ref 0
 let v_env = Hashtbl.create 1600
-let is_temp_var name = String.starts_with ~prefix:"t" name && String.length name > 1
+let is_temp_var name = 
+  let len = String.length name in
+  len > 1 && name.[0] = 't' && (let c = name.[1] in '0' <= c && c <= '9')
 
 (* 为变量分配存储 *)
 let alloc_storage var =
@@ -317,9 +319,14 @@ let com_func (f : ir_func) : string =
 
   (* 检查函数是否以ret结束，如果没有则添加默认返回 *)
   let body_code =
-    if not (String.ends_with ~suffix:"\tret\n" body_code) then
+    let len = String.length body_code in
+    let suffix = "\tret\n" in
+    let suffix_len = String.length suffix in
+    if len >= suffix_len && 
+       String.sub body_code (len - suffix_len) suffix_len = suffix then
+      body_code
+    else
       body_code ^ "\tlw ra, 4(sp)\n\taddi sp, sp, 800\n\taddi sp, sp, 800\n\tret\n"
-    else body_code
   in
   
   let func_label = f.name in
@@ -340,9 +347,14 @@ let com_func_o (f : ir_func_o) : string =
 
   (* 检查函数是否以ret结束，如果没有则添加默认返回 *)
   let body_code =
-    if not (String.ends_with ~suffix:"\tret\n" body_code) then
+    let len = String.length body_code in
+    let suffix = "\tret\n" in
+    let suffix_len = String.length suffix in
+    if len >= suffix_len && 
+       String.sub body_code (len - suffix_len) suffix_len = suffix then
+      body_code
+    else
       body_code ^ "\tlw ra, 4(sp)\n\taddi sp, sp, 800\n\taddi sp, sp, 800\n\tret\n"
-    else body_code
   in
   
   let func_label = f.name in
