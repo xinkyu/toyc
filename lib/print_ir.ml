@@ -1,4 +1,4 @@
-(* print_ir.ml *)
+(* file: lib/print_ir.ml *)
 
 open Ir
 
@@ -59,7 +59,13 @@ let print_ir_func_o (f : ir_func_o) =
   Printf.printf "function %s(%s):\n" f.name (String.concat ", " f.args);
   List.iter print_ir_block f.blocks
 
+(* 修正后的版本 *)
 let print_ir_program (prog : ir_program) =
   match prog with
   | Ir_funcs funcs -> List.iter print_ir_func funcs
   | Ir_funcs_o funcs -> List.iter print_ir_func_o funcs
+  | Ir_funcs_alloc funcs ->
+      List.iter (fun f ->
+        Printf.printf "function %s(%s): (allocated)\n" f.name (String.concat ", " f.args);
+        List.iter print_ir_block f.blocks
+      ) funcs

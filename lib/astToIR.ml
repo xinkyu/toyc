@@ -2,7 +2,7 @@
 
 open Ast
 open Ir
-open Regalloc (* 引入我们的新模块 *)
+(* open Regalloc -> 已移除 *)
 
 module Env = Map.Make (String)
 
@@ -224,7 +224,6 @@ let pblocks (insts : ir_inst list) : ir_block list =
   let entry_label, labelmap = fIRlabel LabelMap.empty "entry" in
   split [] [] entry_label labelmap insts
 
-(* --- 修改这个函数来调用寄存器分配 --- *)
 let func_iro (f : func_def) : allocated_func =
   let init_map = List.fold_left (fun m name -> Env.add name (Var name) m) Env.empty f.params in
   let ctx0 = { env_stack = ref [init_map]; break_lbl = None; continue_lbl = None } in
@@ -235,18 +234,14 @@ let func_iro (f : func_def) : allocated_func =
   in
   let raw_blocks = pblocks linear_ir in
   let opt_blocks = Cfg.optimize raw_blocks in
-
-  (* 在这里调用寄存器分配器！ *)
   let alloc_map, spill_size = Regalloc.run opt_blocks in
-
   { name = f.func_name;
     args = f.params;
     blocks = opt_blocks;
     alloc_map = alloc_map;
-    stack_size = abs spill_size; (* spill_size 是负的 *)
+    stack_size = abs spill_size;
   }
 
-(* --- 修改这个函数以生成新的 program 类型 --- *)
 let program_ir (cu : comp_unit) (optimize_flag : bool) : ir_program =
   if optimize_flag then
     Ir_funcs_alloc (List.map func_iro cu)
