@@ -8,6 +8,11 @@ type operand =
   | Imm of int
   | Var of string
 
+(* --- 新增：将 allocation 类型定义移到这里 --- *)
+type allocation =
+  | InReg of string  (* 分配到物理寄存器 *)
+  | OnStack of int (* 分配到栈上，值为偏移量 *)
+
 type ir_inst =
   | Binop of string * operand * operand * operand
   | Unop of string * operand * operand
@@ -42,16 +47,14 @@ type ir_block = {
 
 type ir_func_o = { name : string; args : string list; blocks : ir_block list }
 
-(* --- 新增的类型，用于存放分配结果 --- *)
 type allocated_func = {
   name: string;
   args: string list;
   blocks: ir_block list;
-  alloc_map: Regalloc.allocation StringMap.t;
-  mutable stack_size: int; (* 总栈帧大小 *)
+  alloc_map: allocation StringMap.t; (* 现在 allocation 类型在本文件内，不再需要 Regalloc.前缀 *)
+  mutable stack_size: int;
 }
 
-(* --- 更新 ir_program 类型以包含新变体 --- *)
 type ir_program =
   | Ir_funcs of ir_func list
   | Ir_funcs_o of ir_func_o list
