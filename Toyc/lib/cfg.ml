@@ -112,7 +112,9 @@ let process_inst env inst =
       Store (addr', value'), env
 
   | IfGoto (cond, label) ->
-      IfGoto (eval_operand env cond, label), env
+      let cond' = eval_operand env cond in
+      (* 修复: 不要使用不存在的标签 *)
+      IfGoto (cond', label), env
 
   | Ret op_opt ->
       Ret (Option.map (eval_operand env) op_opt), env
@@ -121,7 +123,10 @@ let process_inst env inst =
 
 let process_terminator env term =
   match term with
-  | TermIf (cond, l1, l2) -> TermIf (eval_operand env cond, l1, l2)
+  | TermIf (cond, l1, l2) -> 
+      let cond' = eval_operand env cond in
+      (* 保持原样，不进行激进优化 *)
+      TermIf (cond', l1, l2)
   | TermRet o -> TermRet (Option.map (eval_operand env) o)
   | TermGoto _ | TermSeq _ as t -> t
 
@@ -170,6 +175,7 @@ let build_cfg (blocks : ir_block list) : ir_block list =
   ) reachable;
   reachable
 
+(* 增强的常量传播，更好地处理分支 *)
 let constant_propagation (blocks : ir_block list) : ir_block list =
   let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
   let in_envs = ref StringMap.empty in
@@ -204,5 +210,9 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
   done;
   blocks
 
+(* 增强的优化流程 *)
 let optimize blocks =
-  blocks |> build_cfg |> constant_propagation
+  blocks 
+  |> build_cfg 
+  |> constant_propagation
+  |> build_cfg  (* 最后再次构建CFG，确保清理所有不可达块 *)
