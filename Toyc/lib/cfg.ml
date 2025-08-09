@@ -113,7 +113,6 @@ let process_inst env inst =
 
   | IfGoto (cond, label) ->
       let cond' = eval_operand env cond in
-      (* 修复: 不要使用不存在的标签 *)
       IfGoto (cond', label), env
 
   | Ret op_opt ->
@@ -125,7 +124,6 @@ let process_terminator env term =
   match term with
   | TermIf (cond, l1, l2) -> 
       let cond' = eval_operand env cond in
-      (* 保持原样，不进行激进优化 *)
       TermIf (cond', l1, l2)
   | TermRet o -> TermRet (Option.map (eval_operand env) o)
   | TermGoto _ | TermSeq _ as t -> t
@@ -210,9 +208,54 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
   done;
   blocks
 
+(* 新增: 强度削减优化 *)
+let strength_reduction (blocks : ir_block list) : ir_block list =
+  (* 判断一个整数是否是2的幂 *)
+  let is_power_of_2 n =
+    n > 0 && (n land (n - 1)) = 0
+  in
+  
+  (* 计算一个2的幂数的对数（即2^result = n） *)
+  let log2 n =
+    let rec aux i n =
+      if n = 1 then i
+      else aux (i + 1) (n asr 1)
+    in
+    aux 0 n
+  in
+  
+  (* 处理每个指令 *)
+  let optimize_inst inst =
+    match inst with
+    | Binop ("*", dst, src1, src2) -> (
+        (* 乘法优化: x * 2^n => x << n *)
+        match src1, src2 with
+        | _, Imm n when is_power_of_2 n ->
+            let shift = log2 n in
+            Binop ("<<", dst, src1, Imm shift)
+        | Imm n, _ when is_power_of_2 n ->
+            let shift = log2 n in
+            Binop ("<<", dst, src2, Imm shift)
+        | _ -> inst
+      )
+    | Binop ("/", dst, src1, Imm n) when is_power_of_2 n ->
+        (* 除法优化: x / 2^n => x >> n *)
+        let shift = log2 n in
+        Binop (">>", dst, src1, Imm shift)
+    | _ -> inst
+  in
+  
+  (* 应用于所有基本块 *)
+  List.iter (fun blk ->
+    blk.insts <- List.map optimize_inst blk.insts
+  ) blocks;
+  
+  blocks
+
 (* 增强的优化流程 *)
 let optimize blocks =
   blocks 
   |> build_cfg 
   |> constant_propagation
+  |> strength_reduction  (* 新增强度削减优化 *)
   |> build_cfg  (* 最后再次构建CFG，确保清理所有不可达块 *)
