@@ -41,6 +41,17 @@ let flabel () =
   incr labelid;
   "L" ^ string_of_int id
 
+(* New function to generate unique block labels with context *)
+let block_label_map = ref (Hashtbl.create 50)
+let get_unique_label label =
+  match Hashtbl.find_opt !block_label_map label with
+  | Some existing -> existing
+  | None ->
+      let unique = label ^ "_" ^ string_of_int !labelid in
+      incr labelid;
+      Hashtbl.add !block_label_map label unique;
+      unique
+
 let string_binop = function
   | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
   | Eq -> "==" | Neq -> "!=" | Less -> "<" | Leq -> "<="
@@ -160,55 +171,140 @@ let func_ir (f : func_def) : ir_func =
   let bodycode = match List.rev raw_code with | Label _ :: rest_rev -> List.rev rest_rev | _ -> raw_code in
   { name = f'.func_name; args = f'.params; body = bodycode }
 
-(* --- 全新的、最终修正版的 pblocks 函数 --- *)
+(* Improved pblocks function that prevents duplicate labels *)
 let pblocks (insts : ir_inst list) : ir_block list =
-  (* Pass 1: Group instructions into (label, insts_list) pairs. *)
-  let rec group acc_groups current_insts_rev = function
-    | [] -> List.rev acc_groups
-    | Label l :: rest ->
-        let new_group = (l, List.rev current_insts_rev) in
-        group (new_group :: acc_groups) [] rest
+  (* Reset the label map for each function *)
+  block_label_map := Hashtbl.create 50;
+  
+  (* Ensure we start with a label *)
+  let insts_with_entry = match insts with
+    | Label _ :: _ -> insts
+    | _ -> Label (get_unique_label "entry") :: insts
+  in
+  
+  (* First pass: Find all label names and assign unique IDs *)
+  let label_map = Hashtbl.create 50 in
+  let _ = List.fold_left (fun _ inst ->
+      match inst with
+      | Label l -> 
+          if not (Hashtbl.mem label_map l) then
+            Hashtbl.add label_map l (get_unique_label l)
+      | _ -> ()
+    ) () insts_with_entry
+  in
+  
+  (* Replace labels in instructions *)
+  let replace_label l =
+    match Hashtbl.find_opt label_map l with
+    | Some unique -> unique
+    | None -> 
+        let unique = get_unique_label l in
+        Hashtbl.add label_map l unique;
+        unique
+  in
+  
+  let remap_inst inst =
+    match inst with
+    | Label l -> Label (replace_label l)
+    | Goto l -> Goto (replace_label l)
+    | IfGoto (cond, l) -> IfGoto (cond, replace_label l)
+    | _ -> inst
+  in
+  
+  let remapped_insts = List.map remap_inst insts_with_entry in
+  
+  (* Group instructions by labels *)
+  let rec group_blocks acc current_label current_insts = function
+    | [] -> 
+        (* Add the last block *)
+        if current_insts = [] then acc
+        else (current_label, List.rev current_insts) :: acc
+    | (Label l) :: rest ->
+        (* When we find a new label, finish the current block and start a new one *)
+        let new_acc = 
+          if current_insts = [] then acc 
+          else (current_label, List.rev current_insts) :: acc 
+        in
+        group_blocks new_acc l [] rest
     | inst :: rest ->
-        group acc_groups (inst :: current_insts_rev) rest
+        (* Add instruction to current block *)
+        group_blocks acc current_label (inst :: current_insts) rest
   in
-  let groups =
-    match insts with
-    | Label l :: rest -> group [] [] rest |> List.rev |> fun g -> (l, []) :: g
-    | _ -> [("entry", insts)]
+  
+  (* Get initial blocks - grouped by labels *)
+  let initial_blocks = match remapped_insts with
+    | Label first_label :: rest -> 
+        group_blocks [] first_label [] rest
+    | _ -> failwith "pblocks: expected Label after remapping"
   in
-
-  (* Pass 2: Create ir_block records, looking ahead to the next block for fallthrough labels. *)
-  let rec create_blocks acc = function
+  
+  (* Convert blocks to ir_block records *)
+  let blocks = List.rev initial_blocks in
+  
+  (* Process blocks to determine terminators and successors *)
+  let rec process_blocks acc = function
     | [] -> List.rev acc
-    | [ (label, insts) ] -> (* Last block *)
-        let terminator = match List.rev insts with
-          | Ret op :: _ -> TermRet op
-          | Goto l :: _ -> TermGoto l
-          | IfGoto _ :: _ -> failwith "pblocks: IfGoto cannot be last instruction of a function"
-          | _ -> TermRet None
+    | (label, insts) :: rest ->
+        let next_label = match rest with
+          | (next_l, _) :: _ -> Some next_l
+          | [] -> None
         in
-        let final_insts = match List.rev insts with
-          | Ret _ :: r | Goto _ :: r -> List.rev r
-          | _ -> insts
+        
+        (* Determine terminator based on last instruction *)
+        let (terminator, final_insts) = match List.rev insts with
+          | Ret op :: remaining -> (TermRet op, List.rev remaining)
+          | Goto target :: remaining -> (TermGoto target, List.rev remaining)
+          | IfGoto (cond, target) :: remaining ->
+              (match next_label with
+               | Some next -> (TermIf (cond, target, next), List.rev remaining)
+               | None -> failwith "pblocks: IfGoto at end with no next block")
+          | _ -> 
+              (match next_label with
+               | Some next -> (TermSeq next, insts)
+               | None -> (TermRet None, insts)) (* Default terminator for last block *)
         in
-        let block = { label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty } in
-        List.rev (block :: acc)
-    | (label, insts) :: ( (next_label, _) :: rest as tail) ->
-        let terminator = match List.rev insts with
-          | Ret op :: _ -> TermRet op
-          | Goto l :: _ -> TermGoto l
-          | IfGoto (cond, target) :: _ -> TermIf (cond, target, next_label)
-          | _ -> TermSeq next_label
+        
+        let block = {
+          label;
+          insts = final_insts;
+          terminator;
+          preds = [];
+          succs = [];
+          def = StringSet.empty;
+          use = StringSet.empty;
+          live_in = StringSet.empty;
+          live_out = StringSet.empty
+        } in
+        
+        (* Determine successors based on terminator *)
+        let succs = match terminator with
+          | TermGoto l -> [l]
+          | TermSeq l -> [l] 
+          | TermIf (_, l1, l2) -> [l1; l2]
+          | TermRet _ -> []
         in
-        let final_insts = match List.rev insts with
-          | Ret _ :: r | Goto _ :: r | IfGoto _ :: r -> List.rev r
-          | _ -> insts
-        in
-        let block = { label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty } in
-        create_blocks (block :: acc) tail
+        
+        let block_with_succs = {block with succs} in
+        process_blocks (block_with_succs :: acc) rest
   in
-  create_blocks [] groups
-
+  
+  let blocks_with_succs = process_blocks [] blocks in
+  
+  (* Final pass: Fill in predecessors *)
+  let block_map = List.fold_left (fun map b -> 
+      StringMap.add b.label b map
+  ) StringMap.empty blocks_with_succs in
+  
+  List.iter (fun b ->
+      List.iter (fun succ_label ->
+          match StringMap.find_opt succ_label block_map with
+          | Some succ_block -> 
+              succ_block.preds <- b.label :: succ_block.preds
+          | None -> ()
+      ) b.succs
+  ) blocks_with_succs;
+  
+  blocks_with_succs
 
 let func_iro (f : func_def) : allocated_func =
   labelid := 0;
