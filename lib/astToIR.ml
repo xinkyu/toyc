@@ -324,13 +324,12 @@ let func_ir (f : func_def) : ir_func =
   in
   { name = f'.func_name; args = f'.params; body = bodycode }
 
-(* 线性IR -> 过程块IR *)
+(* 过程块IR转换 -> 使用修正后的版本 *)
 let pblocks (insts : ir_inst list) : ir_block list =
   let rec split acc curr label labelmap insts =
     match insts with
-    | [] -> 
+    | [] ->
         List.rev acc
-        (*| _ -> failwith "Basic block must end with a terminator")*)
     | Label l :: rest -> (
         (* 当前块结束，开启新块 *)
         match curr with
@@ -346,6 +345,11 @@ let pblocks (insts : ir_inst list) : ir_block list =
                 terminator = TermSeq next_label;
                 preds = [];
                 succs = [];
+                (* --- 新增初始化 --- *)
+                def = Ir.StringSet.empty;
+                use = Ir.StringSet.empty;
+                live_in = Ir.StringSet.empty;
+                live_out = Ir.StringSet.empty;
               }
             in
             let acc' = blk :: acc in
@@ -363,6 +367,11 @@ let pblocks (insts : ir_inst list) : ir_block list =
             terminator = TermGoto goto_label;
             preds = [];
             succs = [];
+            (* --- 新增初始化 --- *)
+            def = Ir.StringSet.empty;
+            use = Ir.StringSet.empty;
+            live_in = Ir.StringSet.empty;
+            live_out = Ir.StringSet.empty;
           }
         in
         split (blk :: acc) [] next_label labelmap'' rest
@@ -378,6 +387,11 @@ let pblocks (insts : ir_inst list) : ir_block list =
             terminator = TermIf (cond, then_label, else_label);
             preds = [];
             succs = [];
+            (* --- 新增初始化 --- *)
+            def = Ir.StringSet.empty;
+            use = Ir.StringSet.empty;
+            live_in = Ir.StringSet.empty;
+            live_out = Ir.StringSet.empty;
           }
         in
         split (blk :: acc) [] else_label labelmap'' rest
@@ -392,6 +406,11 @@ let pblocks (insts : ir_inst list) : ir_block list =
             terminator = TermRet op;
             preds = [];
             succs = [];
+            (* --- 新增初始化 --- *)
+            def = Ir.StringSet.empty;
+            use = Ir.StringSet.empty;
+            live_in = Ir.StringSet.empty;
+            live_out = Ir.StringSet.empty;
           }
         in
         split (blk :: acc) [] next_label labelmap' rest
