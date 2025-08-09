@@ -35,9 +35,6 @@ let () =
   let block_ir = List.exists (( = ) "-block-ir") args in
   let opt_flag = List.exists (( = ) "-opt") args in
   let opt_flag = block_ir || opt_flag in
-  
-  (* 始终启用优化 *)
-  let opt_flag = true in
 
   (* 读取 stdin 输入 *)
   let input = read_all_input () in
@@ -48,7 +45,7 @@ let () =
   if print_ast then
     Printf.printf "AST:\n\n%s\n\n" (Print_ast.string_of_comp_unit ast);
 
-  let ir = AstToIR.program_ir ast opt_flag in
+  let ir = AstToIR.program_ir ast true in
 
   if print_ir then begin 
     Printf.printf "IR:\n\n";
