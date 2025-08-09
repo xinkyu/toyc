@@ -43,36 +43,37 @@ let com_inst (inst : ir_inst) : string =
           (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
       in
       let lhs_code = l_operand "t1" lhs in
-      let rhs_code, op_code =
-        match op, rhs with
-        | "*", Imm n when is_power_of_2 n ->
-            (* 优化：乘以2的幂用移位代替 *)
-            let shift = log2 n in
-            Printf.sprintf "\tli t2, %d\n" shift,
-            "\tsll t0, t1, t2\n"
-        | "*", _ ->
-            rhs_code = l_operand "t2" rhs,
-            "\tmul t0, t1, t2\n"
-        | "/", Imm n when is_power_of_2 n ->
-            (* 优化：除以2的幂用移位代替 *)
-            let shift = log2 n in
-            Printf.sprintf "\tli t2, %d\n" shift,
-            "\tsra t0, t1, t2\n"  (* 算术右移，保持符号 *)
-        | "/", _ ->
-            l_operand "t2" rhs,
-            "\tdiv t0, t1, t2\n"
-        | "+" -> l_operand "t2" rhs, "\tadd t0, t1, t2\n"
-        | "-" -> l_operand "t2" rhs, "\tsub t0, t1, t2\n"
-        | "%" -> l_operand "t2" rhs, "\trem t0, t1, t2\n"
-        | "==" -> l_operand "t2" rhs, "\tsub t0, t1, t2\n\tseqz t0, t0\n"
-        | "!=" -> l_operand "t2" rhs, "\tsub t0, t1, t2\n\tsnez t0, t0\n"
-        | "<=" -> l_operand "t2" rhs, "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
-        | ">=" -> l_operand "t2" rhs, "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
-        | "<" -> l_operand "t2" rhs, "\tslt t0, t1, t2\n"
-        | ">" -> l_operand "t2" rhs, "\tsgt t0, t1, t2\n"
-        | "&&" -> l_operand "t2" rhs, "\tand t0, t1, t2\n"
-        | "||" -> l_operand "t2" rhs, "\tor t0, t1, t2\n"
-        | _ -> l_operand "t2" rhs, failwith ("Unknown binop: " ^ op)
+      (* 处理不同操作符的代码生成 *)
+      let (rhs_code, op_code) = 
+        match op with
+        | "*" -> 
+            (match rhs with
+             | Imm n when is_power_of_2 n ->
+                 (* 优化：乘以2的幂用移位代替 *)
+                 let shift = log2 n in
+                 (Printf.sprintf "\tli t2, %d\n" shift,
+                  "\tsll t0, t1, t2\n")
+             | _ -> (l_operand "t2" rhs, "\tmul t0, t1, t2\n"))
+        | "/" -> 
+            (match rhs with
+             | Imm n when is_power_of_2 n ->
+                 (* 优化：除以2的幂用移位代替 *)
+                 let shift = log2 n in
+                 (Printf.sprintf "\tli t2, %d\n" shift,
+                  "\tsra t0, t1, t2\n")  (* 算术右移，保持符号 *)
+             | _ -> (l_operand "t2" rhs, "\tdiv t0, t1, t2\n"))
+        | "+" -> (l_operand "t2" rhs, "\tadd t0, t1, t2\n")
+        | "-" -> (l_operand "t2" rhs, "\tsub t0, t1, t2\n")
+        | "%" -> (l_operand "t2" rhs, "\trem t0, t1, t2\n")
+        | "==" -> (l_operand "t2" rhs, "\tsub t0, t1, t2\n\tseqz t0, t0\n")
+        | "!=" -> (l_operand "t2" rhs, "\tsub t0, t1, t2\n\tsnez t0, t0\n")
+        | "<=" -> (l_operand "t2" rhs, "\tsgt t0, t1, t2\n\txori t0, t0, 1\n")
+        | ">=" -> (l_operand "t2" rhs, "\tslt t0, t1, t2\n\txori t0, t0, 1\n")
+        | "<" -> (l_operand "t2" rhs, "\tslt t0, t1, t2\n")
+        | ">" -> (l_operand "t2" rhs, "\tsgt t0, t1, t2\n")
+        | "&&" -> (l_operand "t2" rhs, "\tand t0, t1, t2\n")
+        | "||" -> (l_operand "t2" rhs, "\tor t0, t1, t2\n")
+        | _ -> (l_operand "t2" rhs, failwith ("Unknown binop: " ^ op))
       in
       lhs_code ^ rhs_code ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
   | Unop (op, dst, src) ->
