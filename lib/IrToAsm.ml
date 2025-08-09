@@ -43,33 +43,38 @@ let com_inst (inst : ir_inst) : string =
           (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
       in
       let lhs_code = l_operand "t1" lhs in
-      let rhs_code = l_operand "t2" rhs in
-      let op_code =
+      
+      (* 根据操作符和右操作数生成代码 *)
+      let (rhs_code, op_code) = 
         match op, rhs with
         | "*", Imm n when is_power_of_2 n ->
             (* 优化：乘以2的幂用移位代替 *)
             let shift = log2 n in
-            Printf.sprintf "\tli t2, %d\n\tsll t0, t1, t2\n" shift
+            Printf.sprintf "\tli t2, %d\n" shift,
+            "\tsll t0, t1, t2\n"
         | "/", Imm n when is_power_of_2 n ->
             (* 优化：除以2的幂用移位代替 *)
             let shift = log2 n in
-            Printf.sprintf "\tli t2, %d\n\tsra t0, t1, t2\n" shift
-        | "+", _ -> "\tadd t0, t1, t2\n"
-        | "-", _ -> "\tsub t0, t1, t2\n"
-        | "*", _ -> "\tmul t0, t1, t2\n"
-        | "/", _ -> "\tdiv t0, t1, t2\n"
-        | "%", _ -> "\trem t0, t1, t2\n"
-        | "==", _ -> "\tsub t0, t1, t2\n\tseqz t0, t0\n"
-        | "!=", _ -> "\tsub t0, t1, t2\n\tsnez t0, t0\n"
-        | "<=", _ -> "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
-        | ">=", _ -> "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
-        | "<", _ -> "\tslt t0, t1, t2\n"
-        | ">", _ -> "\tsgt t0, t1, t2\n"
-        | "&&", _ -> "\tand t0, t1, t2\n"
-        | "||", _ -> "\tor t0, t1, t2\n"
-        | _, _ -> failwith ("Unknown binop: " ^ op)
+            Printf.sprintf "\tli t2, %d\n" shift,
+            "\tsra t0, t1, t2\n"
+        | "+", _ -> l_operand "t2" rhs, "\tadd t0, t1, t2\n"
+        | "-", _ -> l_operand "t2" rhs, "\tsub t0, t1, t2\n"
+        | "*", _ -> l_operand "t2" rhs, "\tmul t0, t1, t2\n"
+        | "/", _ -> l_operand "t2" rhs, "\tdiv t0, t1, t2\n"
+        | "%", _ -> l_operand "t2" rhs, "\trem t0, t1, t2\n"
+        | "==", _ -> l_operand "t2" rhs, "\tsub t0, t1, t2\n\tseqz t0, t0\n"
+        | "!=", _ -> l_operand "t2" rhs, "\tsub t0, t1, t2\n\tsnez t0, t0\n"
+        | "<=", _ -> l_operand "t2" rhs, "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
+        | ">=", _ -> l_operand "t2" rhs, "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
+        | "<", _ -> l_operand "t2" rhs, "\tslt t0, t1, t2\n"
+        | ">", _ -> l_operand "t2" rhs, "\tsgt t0, t1, t2\n"
+        | "&&", _ -> l_operand "t2" rhs, "\tand t0, t1, t2\n"
+        | "||", _ -> l_operand "t2" rhs, "\tor t0, t1, t2\n"
+        | _, _ -> l_operand "t2" rhs, failwith ("Unknown binop: " ^ op)
       in
-      lhs_code ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+      
+      lhs_code ^ rhs_code ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+      
   | Unop (op, dst, src) ->
       let dst_off =
         all_st
@@ -84,6 +89,7 @@ let com_inst (inst : ir_inst) : string =
         | _ -> failwith ("Unknown unop: " ^ op)
       in
       load_src ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+      
   | Assign (dst, src) ->
       let dst_off =
         all_st
@@ -91,6 +97,7 @@ let com_inst (inst : ir_inst) : string =
       in
       let load_src = l_operand "t0" src in
       load_src ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+      
   | Load (dst, src) ->
       let dst_off =
         all_st
@@ -98,10 +105,12 @@ let com_inst (inst : ir_inst) : string =
       in
       let src_code = l_operand "t1" src in
       src_code ^ "\tlw t0, 0(t1)\n" ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+      
   | Store (dst, src) ->
       let dst_code = l_operand "t1" dst in
       let src_code = l_operand "t2" src in
       dst_code ^ src_code ^ "\tsw t2, 0(t1)\n"
+      
   | Call (dst, fname, args) ->
       let dst_off =
         all_st
@@ -118,11 +127,13 @@ let com_inst (inst : ir_inst) : string =
         |> String.concat ""
       in
       args_code ^ Printf.sprintf "\tcall %s\n\tsw a0, %d(sp)\n" fname dst_off
+      
   | Ret None ->
       let ra_offset = get_sto "ra" in
       Printf.sprintf
         "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
         ra_offset
+        
   | Ret (Some op) ->
       let load_code = l_operand "a0" op in
       let ra_offset = get_sto "ra" in
@@ -130,35 +141,54 @@ let com_inst (inst : ir_inst) : string =
       ^ Printf.sprintf
           "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
           ra_offset
+          
   | Goto label -> Printf.sprintf "\tj %s\n" label
+  
   | IfGoto (cond, label) ->
       let cond_code = l_operand "t0" cond in
       cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
+      
   | Label label -> Printf.sprintf "%s:\n" label
 
 (* 优化尾递归调用 *)
-let optimize_tail_calls (func_name : string) (insts : ir_inst list) : ir_inst list =
-  let rec find_tail_calls acc remaining =
-    match remaining with
-    | Call (dst, fname, args) :: Ret (Some ret_val) :: rest when 
-        fname = func_name && 
-        (match dst, ret_val with
-         | Reg d, Reg r | Var d, Var r | Reg d, Var r | Var d, Reg r -> d = r
-         | _ -> false) ->
-        (* 找到尾递归调用，将其转换为参数重新赋值和跳转 *)
-        let new_insts = List.fold_right2 
-          (fun arg param_name acc -> 
-             Assign (Var param_name, arg) :: acc)
-          args
-          [] (* 这里应该填入函数参数名列表，但需要上下文信息 *)
-          [Goto "func_start"] 
-        in
-        find_tail_calls (new_insts @ acc) rest
-    | inst :: rest ->
-        find_tail_calls (inst :: acc) rest
+let optimize_tail_calls (func_name : string) (args : string list) (insts : ir_inst list) : ir_inst list =
+  let rec process_insts acc = function
     | [] -> List.rev acc
+    | Call (dst, fname, call_args) :: Ret (Some ret_val) :: rest 
+      when fname = func_name && 
+           (match dst, ret_val with
+            | Reg d, Reg r | Var d, Var r | Reg d, Var r | Var d, Reg r -> d = r
+            | _ -> false) ->
+        (* 找到尾递归调用，转换为参数赋值和跳转 *)
+        let param_assigns = 
+          List.mapi (fun i arg ->
+              if i < List.length args then
+                let param_name = List.nth args i in
+                Assign (Var param_name, arg)
+              else
+                Call (dst, fname, call_args) (* 保持原样，不应该发生 *)
+            ) call_args
+        in
+        process_insts (List.rev (Goto "func_start" :: param_assigns) @ acc) rest
+    | inst :: rest ->
+        process_insts (inst :: acc) rest
   in
-  find_tail_calls [] insts
+  
+  (* 只有当函数内有尾递归调用时才添加标签 *)
+  let has_tail_call = 
+    List.exists (function
+      | Call (_, fname, _) :: Ret _ :: _ when fname = func_name -> true
+      | _ -> false
+    ) (List.mapi (fun i inst -> 
+         if i < List.length insts - 1 then [inst; List.nth insts (i+1)]
+         else [inst]
+       ) insts)
+  in
+  
+  if has_tail_call then
+    Label "func_start" :: process_insts [] insts
+  else
+    insts
 
 let com_block (blk : ir_block) : string =
   blk.insts |> List.map com_inst |> String.concat ""
@@ -187,17 +217,8 @@ let com_func (f : ir_func) : string =
     pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra")
   in
 
-  (* 尝试优化尾递归调用 *)
-  let optimized_body = 
-    if List.exists (function 
-        | Call (_, fname, _) when fname = f.name -> true 
-        | _ -> false) f.body
-    then
-      (* 有可能的尾递归调用，添加标签 *)
-      Label "func_start" :: f.body
-    else
-      f.body
-  in
+  (* 优化尾递归调用 *)
+  let optimized_body = optimize_tail_calls f.name f.args f.body in
 
   let body_code = optimized_body |> List.map com_inst |> String.concat "" in
 
