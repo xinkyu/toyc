@@ -301,7 +301,8 @@ let setup_function_args args =
           Hashtbl.add v_env name (Stack offset);
           Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
             (-4 * (i - 8))
-            offset)
+            offset
+      )
     args
   |> String.concat ""
 
