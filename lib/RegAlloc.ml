@@ -186,6 +186,7 @@ let allocate_registers (intervals: live_interval list) =
 (** 主入口函数**)
 (*******************************************************************)
 
+
 let run (blocks: ir_block list) : (allocation StringMap.t * int) =
   let intervals_map = build_live_intervals blocks in
   let intervals_list = StringMap.bindings intervals_map |> List.map snd in
