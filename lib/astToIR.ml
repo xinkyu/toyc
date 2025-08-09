@@ -44,16 +44,6 @@ let flabel () =
   incr labelid;
   "L" ^ string_of_int id
 
-let fIRlabel (labelmap : string LabelMap.t) (l : param) : string * string LabelMap.t =
-  match LabelMap.find_opt l labelmap with
-  | Some lbl -> (lbl, labelmap)
-  | None ->
-      let id = !irlabid in
-      incr irlabid;
-      let lbl = "LABEL" ^ string_of_int id in
-      let labelmap' = LabelMap.add l lbl labelmap in
-      (lbl, labelmap')
-
 let string_binop = function
   | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
   | Eq -> "==" | Neq -> "!=" | Less -> "<" | Leq -> "<="
@@ -74,9 +64,7 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
       match operand with
       | Imm n ->
           let folded = match op with
-            | Plus -> Imm n
-            | Minus -> Imm (-n)
-            | Not -> Imm (if n = 0 then 1 else 0)
+            | Plus -> Imm n | Minus -> Imm (-n) | Not -> Imm (if n = 0 then 1 else 0)
           in (folded, code)
       | _ -> let res = ftemp () in (res, code @ [ Unop (string_unop op, res, operand) ]))
   | Binop (op, e1, e2) -> (
@@ -95,9 +83,7 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
   | Call (f, args) ->
       let codes, oprs =
         List.fold_left
-          (fun (acc_code, acc_opr) arg ->
-            let opr, code = expr_ir ctx arg in
-            (acc_code @ code, acc_opr @ [ opr ]))
+          (fun (acc_code, acc_opr) arg -> let opr, code = expr_ir ctx arg in (acc_code @ code, acc_opr @ [ opr ]))
           ([], []) args
       in
       let ret = ftemp () in (ret, codes @ [ Call (ret, f, oprs) ])
@@ -107,38 +93,28 @@ let rec dstmt = function
       let ands = Ast.split_and cond in
       if List.length ands > 1 then
         let rec nand = function
-          | [x]    -> If(x, then_b, Some else_b)
-          | hd::tl -> If(hd, Block [nand tl], Some else_b)
-          | []     -> Block []
+          | [x] -> If(x, then_b, Some else_b) | hd::tl -> If(hd, Block [nand tl], Some else_b) | [] -> Block []
         in dstmt (nand ands)
       else
       let ors = Ast.split_or cond in
       if List.length ors > 1 then
         let rec nor = function
-          | [x]    -> If(x, then_b, Some else_b)
-          | hd::tl -> If(hd, then_b, Some (nor tl))
-          | []     -> Block []
+          | [x] -> If(x, then_b, Some else_b) | hd::tl -> If(hd, then_b, Some (nor tl)) | [] -> Block []
         in dstmt (nor ors)
-      else
-        If(cond, dstmt then_b, Some (dstmt else_b))
+      else If(cond, dstmt then_b, Some (dstmt else_b))
   | If(cond, then_b, None) ->
       let ands = Ast.split_and cond in
       if List.length ands > 1 then
         let rec nand = function
-          | [x]    -> If(x, then_b, None)
-          | hd::tl -> If(hd, Block [nand tl], None)
-          | []     -> Block []
+          | [x] -> If(x, then_b, None) | hd::tl -> If(hd, Block [nand tl], None) | [] -> Block []
         in dstmt (nand ands)
       else
       let ors = Ast.split_or cond in
       if List.length ors > 1 then
         let rec nor = function
-          | [x]    -> If(x, then_b, None)
-          | hd::tl -> If(hd, then_b, Some (nor tl))
-          | []     -> Block []
+          | [x] -> If(x, then_b, None) | hd::tl -> If(hd, then_b, Some (nor tl)) | [] -> Block []
         in dstmt (nor ors)
-      else
-        If(cond, dstmt then_b, None)
+      else If(cond, dstmt then_b, None)
   | While(cond, body) -> While(cond, dstmt body)
   | Block ss -> Block(List.map dstmt ss)
   | other -> other
@@ -147,72 +123,55 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
   match s with
   | Empty -> Normal []
   | ExprStmt e -> let _, code = expr_ir ctx e in Normal code
-  | Decl (x, None) ->
-      let new_name = fname x in
-      ctx.env_stack := Envs.add x (Var new_name) !(ctx.env_stack); Normal []
-  | Decl (x, Some e) ->
-      let v, c = expr_ir ctx e in
-      let new_name = fname x in
-      ctx.env_stack := Envs.add x (Var new_name) !(ctx.env_stack); Normal (c @ [ Assign (Var new_name, v) ])
-  | Assign (x, e) ->
-      let v, c = expr_ir ctx e in
-      let var = Envs.lookup x !(ctx.env_stack) in Normal (c @ [ Assign (var, v) ])
+  | Decl (x, None) -> let new_name = fname x in ctx.env_stack := Envs.add x (Var new_name) !(ctx.env_stack); Normal []
+  | Decl (x, Some e) -> let v, c = expr_ir ctx e in let new_name = fname x in ctx.env_stack := Envs.add x (Var new_name) !(ctx.env_stack); Normal (c @ [ Assign (Var new_name, v) ])
+  | Assign (x, e) -> let v, c = expr_ir ctx e in let var = Envs.lookup x !(ctx.env_stack) in Normal (c @ [ Assign (var, v) ])
   | Return None -> Returned [ Ret None ]
   | Return (Some e) -> let v, c = expr_ir ctx e in Returned (c @ [ Ret (Some v) ])
   | If (cond, tstmt, Some fstmt) -> (
       let cnd, cc = expr_ir ctx cond in
       let lthen = flabel () and lelse = flabel () and lend = flabel () in
       let then_res = stmt_res ctx (dstmt tstmt) and else_res = stmt_res ctx (dstmt fstmt) in
-      let raw_then = flatten then_res in
-      let then_code = if ends raw_then then raw_then else raw_then @ [ Goto lend ] in
-      let raw_else = flatten else_res in
-      let else_code = if ends raw_else then raw_else else raw_else @ [ Goto lend ] in
+      let raw_then = flatten then_res in let then_code = if ends raw_then then raw_then else raw_then @ [ Goto lend ] in
+      let raw_else = flatten else_res in let else_code = if ends raw_else then raw_else else raw_else @ [ Goto lend ] in
       let code = cc @ [ IfGoto (cnd, lthen); Goto lelse ] @ [ Label lthen ] @ then_code @ [ Label lelse ] @ else_code @ [ Label lend ] in
       match (then_res, else_res) with | Returned _, _ | _, Returned _ -> Returned code | _ -> Normal code)
   | If (cond, tstmt, None) ->
       let cnd, cc = expr_ir ctx cond in
       let lthen = flabel () and lskip = flabel () in
-      let then_res = stmt_res ctx (dstmt tstmt) in
-      let then_code = flatten then_res in
+      let then_res = stmt_res ctx (dstmt tstmt) in let then_code = flatten then_res in
       let code = cc @ [ IfGoto (cnd, lthen); Goto lskip ] @ [ Label lthen ] @ then_code @ [ Label lskip ] in Normal code
   | While (cond, body) ->
       let lcond = flabel () and lbody = flabel () and lend = flabel () in
       let ctx_loop = { ctx with break_lbl = Some lend; continue_lbl = Some lcond } in
       let cnd, ccode = expr_ir ctx_loop cond in
-      let body_res = stmt_res ctx_loop (dstmt body) in
-      let bcode = flatten body_res in
+      let body_res = stmt_res ctx_loop (dstmt body) in let bcode = flatten body_res in
       let code = [ Goto lcond; Label lcond ] @ ccode @ [ IfGoto (cnd, lbody); Goto lend ] @ [ Label lbody ] @ bcode @ [ Goto lcond; Label lend ] in Normal code
   | Break -> (match ctx.break_lbl with Some lbl -> Normal [ Goto lbl ] | None -> failwith "break")
   | Continue -> (match ctx.continue_lbl with Some lbl -> Normal [ Goto lbl ] | None -> failwith "continue")
   | Block stmts ->
       ctx.env_stack := Envs.enter !(ctx.env_stack);
-      let rec loop acc = function
-        | [] -> Normal acc
-        | hd::tl -> (match stmt_res ctx hd with | Returned c -> Returned (acc @ c) | Normal c -> loop (acc @ c) tl)
-      in
-      let res = loop [] stmts in ctx.env_stack := Envs.exit !(ctx.env_stack); res
+      let rec loop acc = function | [] -> Normal acc | hd::tl -> (match stmt_res ctx hd with | Returned c -> Returned (acc @ c) | Normal c -> loop (acc @ c) tl)
+      in let res = loop [] stmts in ctx.env_stack := Envs.exit !(ctx.env_stack); res
 
 let func_ir (f : func_def) : ir_func =
   let des_body = match dstmt (Block f.body) with Block ss -> ss | _ -> f.body in
   let f' = { f with body = des_body } in
   let init_env = List.fold_left (fun m x -> Env.add x (Var x) m) Env.empty f'.params in
   let ctx0 = { env_stack = ref [init_env]; break_lbl = None; continue_lbl = None } in
-  let body_res = stmt_res ctx0 (Block f'.body) in
-  let raw_code = flatten body_res in
+  let body_res = stmt_res ctx0 (Block f'.body) in let raw_code = flatten body_res in
   let bodycode = match List.rev raw_code with | Label _ :: rest_rev -> List.rev rest_rev | _ -> raw_code in
   { name = f'.func_name; args = f'.params; body = bodycode }
 
-(* --- 全新的 pblocks 函数 --- *)
+(* --- 全新的、修正后的 pblocks 函数 --- *)
 let pblocks (insts : ir_inst list) : ir_block list =
   let create_block label insts =
     let terminator =
       match List.rev insts with
       | Ret op :: _ -> TermRet op
       | Goto l :: _ -> TermGoto l
-      | IfGoto (cond, l) :: rest ->
-          let next_label = match rest with Label l' :: _ -> l' | _ -> flabel() in
-          TermIf (cond, l, next_label)
-      | _ -> TermRet None (* Default terminator for fallthrough or end of function *)
+      | IfGoto (cond, l) :: rest -> TermIf (cond, l, match rest with Label l' :: _ -> l' | _ -> flabel())
+      | _ -> TermRet None
     in
     let insts' =
       match terminator with
@@ -223,33 +182,27 @@ let pblocks (insts : ir_inst list) : ir_block list =
       def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
     }
   in
-  let rec split_by_label current_blocks current_insts inst_list =
+  let rec group_by_label acc_groups current_insts inst_list =
     match inst_list with
-    | [] ->
-        if current_insts <> [] then List.rev (current_insts :: current_blocks)
-        else List.rev current_blocks
+    | [] -> List.rev (current_insts :: acc_groups)
     | Label l :: rest ->
-        let new_blocks =
-          if current_insts <> [] then List.rev current_insts :: current_blocks
-          else current_blocks
-        in
-        split_by_label new_blocks [Label l] rest
+        let new_groups = List.rev current_insts :: acc_groups in
+        group_by_label new_groups [Label l] rest
     | inst :: rest ->
-        split_by_label current_blocks (inst :: current_insts) rest
+        group_by_label acc_groups (inst :: current_insts) rest
   in
-  let inst_groups =
-    match insts with
-    | Label _ as l -> split_by_label [] [] (l::(List.tl insts))
-    | _ -> split_by_label [] [] (Label "entry" :: insts)
+  let insts_with_entry = match insts with
+    | Label _ :: _ -> insts
+    | _ -> Label "entry" :: insts
   in
+  let groups = group_by_label [] [] insts_with_entry in
   List.map (fun group ->
-    let label = match group with Label l :: _ -> l | _ -> failwith "Block has no label" in
-    create_block label (List.rev group)
-  ) inst_groups
-
+    let rev_group = List.rev group in
+    let label = match rev_group with Label l :: _ -> l | _ -> failwith "Block has no label" in
+    create_block label rev_group
+  ) groups
 
 let func_iro (f : func_def) : allocated_func =
-  (* Reset global counters for each function to keep labels unique *)
   labelid := 0; irlabid := 0;
   let init_map = List.fold_left (fun m name -> Env.add name (Var name) m) Env.empty f.params in
   let ctx0 = { env_stack = ref [init_map]; break_lbl = None; continue_lbl = None } in

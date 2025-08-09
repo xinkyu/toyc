@@ -66,8 +66,7 @@ let com_func_alloc (f : allocated_func) : string =
 
   let body_asm =
       List.mapi (fun blk_idx (b: ir_block) ->
-        (* 对函数的第一个块，不打印其标签（如entry），因为它紧跟函数名标签 *)
-        let block_label = if blk_idx = 0 then "" else Printf.sprintf "%s:\n" b.label in
+        let block_label = if blk_idx = 0 && b.label = "entry" then "" else Printf.sprintf "%s:\n" b.label in
         let insts_code =
           List.map (fun inst ->
             match inst with
@@ -100,7 +99,7 @@ let com_func_alloc (f : allocated_func) : string =
                 in
                 let post_call = if stack_space_for_args > 0 then Printf.sprintf "\taddi sp, sp, %d\n" stack_space_for_args else "" in
                 pre_call ^ args_setup ^ Printf.sprintf "\tcall %s\n" fname ^ post_call ^ store_operand "a0" dst
-            | _ -> "" (* Goto, IfGoto, Label, Ret are handled by terminators or block structure *)
+            | _ -> ""
           ) b.insts |> String.concat ""
         in
         let term_code = match b.terminator with
@@ -108,7 +107,7 @@ let com_func_alloc (f : allocated_func) : string =
           | TermIf (cond, l1, l2) -> load_operand "t0" cond ^ Printf.sprintf "\tbnez t0, %s\n\tj %s\n" l1 l2
           | TermRet (Some op) -> load_operand "a0" op
           | TermRet None -> ""
-          | TermSeq l -> ""
+          | TermSeq _ -> ""
         in
         block_label ^ insts_code ^ term_code
       ) f.blocks |> String.concat ""
