@@ -14,8 +14,6 @@ module StringMap = Map.Make(String)
 (* 保存当前函数的上下文信息 *)
 type func_context = {
   alloc_map: (string, allocation_location) Hashtbl.t; (* 寄存器分配结果 *)
-  spill_count: int; (* 溢出变量的总数 *)
-  mutable stack_offset: int; (* 当前栈顶偏移 *)
   var_offsets: (string, int) Hashtbl.t; (* 变量到栈偏移的映射 *)
 }
 
@@ -25,7 +23,7 @@ let temp_regs = ["t5"; "t6"]
 (*
  * load_operand: 将一个 IR 操作数加载到一个物理寄存器中
  * 如果操作数是立即数，使用 `li`
- * 如果是已分配寄存器的变量，直接返回寄存器名
+ * 如果是已分配寄存器的变量，使用 `mv`
  * 如果是溢出的变量，从栈上 `lw` 到指定的物理寄存器
  *)
 let load_operand (ctx: func_context) (op: operand) (target_reg: string) : string =
@@ -33,11 +31,13 @@ let load_operand (ctx: func_context) (op: operand) (target_reg: string) : string
   | Imm i -> Printf.sprintf "\tli %s, %d\n" target_reg i
   | Reg r | Var r ->
       (match Hashtbl.find_opt ctx.alloc_map r with
-      | Some (InReg reg) -> Printf.sprintf "\tmv %s, %s\n" target_reg reg
+      | Some (InReg reg) ->
+          if reg <> target_reg then Printf.sprintf "\tmv %s, %s\n" target_reg reg
+          else "" (* Avoid mv a, a *)
       | Some (Spilled _) ->
           let offset = Hashtbl.find ctx.var_offsets r in
           Printf.sprintf "\tlw %s, %d(sp)\n" target_reg offset
-      | None -> "" (* Should not happen for variables in intervals *)
+      | None -> "" (* Should not happen for function arguments or non-live vars *)
       )
 
 (*
@@ -49,7 +49,9 @@ let store_operand (ctx: func_context) (dst: operand) (source_reg: string) : stri
   match dst with
   | Reg r | Var r ->
       (match Hashtbl.find_opt ctx.alloc_map r with
-      | Some (InReg reg) -> Printf.sprintf "\tmv %s, %s\n" reg source_reg
+      | Some (InReg reg) ->
+          if reg <> source_reg then Printf.sprintf "\tmv %s, %s\n" reg source_reg
+          else "" (* Avoid mv a, a *)
       | Some (Spilled _) ->
           let offset = Hashtbl.find ctx.var_offsets r in
           Printf.sprintf "\tsw %s, %d(sp)\n" source_reg offset
@@ -135,21 +137,21 @@ let com_func_o (f: ir_func_o) : string =
   let frame_size = 4 * (spill_count + 1) in (* +1 for 'ra' *)
   let frame_size = if frame_size mod 16 <> 0 then frame_size + (16 - frame_size mod 16) else frame_size in
 
-  let ctx = {
-    alloc_map = alloc_map;
-    spill_count = spill_count;
-    stack_offset = 0;
-    var_offsets = Hashtbl.create 100;
-  } in
-  let current_spill_offset = ref (frame_size - 4) in
+  let var_offsets = Hashtbl.create 100 in
+  let ra_offset = frame_size - 4 in
   Hashtbl.iter (fun var loc ->
     match loc with
-    | Spilled _ ->
-        Hashtbl.add ctx.var_offsets var !current_spill_offset;
-        current_spill_offset := !current_spill_offset - 4
+    | Spilled spill_index ->
+        (* spill_index 0 is the first spilled var. It goes after ra. *)
+        let offset = frame_size - 4 * (spill_index + 2) in
+        Hashtbl.add var_offsets var offset
     | _ -> ()
   ) alloc_map;
-  let ra_offset = frame_size - 4 in
+
+  let ctx = {
+    alloc_map = alloc_map;
+    var_offsets = var_offsets;
+  } in
 
   (* 3. 函数序言 *)
   let prologue = Printf.sprintf "%s:\n\taddi sp, sp, %d\n\tsw ra, %d(sp)\n" f.name (-frame_size) ra_offset in

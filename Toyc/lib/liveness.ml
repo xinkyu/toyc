@@ -2,23 +2,8 @@ open Ir
 
 (*
  * Liveness.ml: 活性分析模块
- *
- * 这个模块实现了编译后端所需的数据流分析——活性分析。
- * 它的核心功能是为给定的控制流图（CFG）计算出在每个程序点（具体来说是每个基本块的入口和出口）
- * 哪些变量是“活跃”的。
- *
- * 一个变量是活跃的，意味着它当前持有的值在未来可能会被用到。
- * 这个信息对于寄存器分配至关重要，因为它告诉我们哪些变量需要被保存在寄存器中。
- *
- * 分析过程：
- * 1. 为每个基本块计算 `uses` (块内使用的变量) 和 `defs` (块内定义的变量) 集合。
- * 2. 使用一个迭代的、后向的数据流分析算法来计算每个块的 `liveIn` 和 `liveOut` 集合。
- * - `liveOut[B] = U liveIn[S]` (对于 B 的所有后继 S)
- * - `liveIn[B] = uses[B] U (liveOut[B] - defs[B])`
- * 3. 持续迭代直到所有集合不再变化。
  *)
 
-(* 使用 OCaml 的 Set 和 Map 模块来处理变量名集合和映射 *)
 module StringSet = Set.Make(String)
 module StringMap = Map.Make(String)
 
@@ -51,7 +36,6 @@ let get_use_def_inst (inst: ir_inst) : StringSet.t * StringSet.t =
   | Store (addr, src) ->
       (StringSet.union (vars_of_operand addr) (vars_of_operand src), StringSet.empty)
   | IfGoto (cond, _) -> (vars_of_operand cond, StringSet.empty)
-  (* Load, Ret None, Goto, Label 不产生 use/def *)
   | Load (dst, src) -> (vars_of_operand src, vars_of_operand dst)
   | _ -> (StringSet.empty, StringSet.empty)
 
@@ -59,8 +43,6 @@ let get_use_def_inst (inst: ir_inst) : StringSet.t * StringSet.t =
 let get_use_def_block (block: ir_block) : StringSet.t * StringSet.t =
   List.fold_left (fun (uses, defs) inst ->
     let inst_uses, inst_defs = get_use_def_inst inst in
-    (* 顺序很重要: use 是在 def 之前发生的 *)
-    (* use_B = (use_B - inst_defs) U inst_uses *)
     let new_uses = StringSet.union inst_uses (StringSet.diff uses inst_defs) in
     let new_defs = StringSet.union defs inst_defs in
     (new_uses, new_defs)
@@ -69,7 +51,7 @@ let get_use_def_block (block: ir_block) : StringSet.t * StringSet.t =
 (* 主分析函数 *)
 let analyze (func: ir_func_o) : (StringSet.t StringMap.t * StringSet.t StringMap.t) =
   let blocks = func.blocks in
-  let block_map = List.fold_left (fun map b -> StringMap.add b.label b map) StringMap.empty blocks in
+  (* FIX: Removed unused 'block_map' variable *)
 
   (* 1. 计算所有块的 use/def 集 *)
   let use_map = ref StringMap.empty in
@@ -112,7 +94,7 @@ let analyze (func: ir_func_o) : (StringSet.t StringMap.t * StringSet.t StringMap
 
       live_in := StringMap.add b.label new_live_in !live_in;
       live_out := StringMap.add b.label new_live_out !live_out;
-    ) (List.rev blocks) (* 从后向前遍历可能收敛更快 *)
+    ) (List.rev blocks)
   done;
 
   (!live_in, !live_out)
