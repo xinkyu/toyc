@@ -84,7 +84,7 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
   (* --- 阶段一: 分析函数，确定栈布局 --- *)
   
   (* 1. 返回地址 (ra) 和旧的帧指针 (fp) 固定分配在栈顶 *)
-  ctx.stack_size <- 8 (* ra 和 fp 各占 4 字节 *)
+  ctx.stack_size <- 8; (* ra 和 fp 各占 4 字节 *)
 
   (* 2. 为所有参数分配栈空间 *)
   List.iteri
@@ -135,7 +135,7 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
     - 使用 ctx 来管理状态
     - 动态获取和释放临时寄存器
   *)
-  let com_inst (inst : ir_inst) : string =
+  let rec com_inst (inst : ir_inst) : string =
     match inst with
     | Binop (op, dst, lhs, rhs) ->
         let t1 = get_temp_reg () in
@@ -153,9 +153,9 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
           | "==" -> Printf.sprintf "\tsub %s, %s, %s\n\tseqz %s, %s\n" t1 t1 t2 t1 t1
           | "!=" -> Printf.sprintf "\tsub %s, %s, %s\n\tsnez %s, %s\n" t1 t1 t2 t1 t1
           | "<" -> Printf.sprintf "\tslt %s, %s, %s\n" t1 t1 t2
-          | "<=" -> Printf.sprintf "\tsgt %s, %s, %s\n\txori %s, %s, 1\n" t1 t2 t1 t1 t1
+          | "<=" -> Printf.sprintf "\tsgt %s, %s, %s\n\txori %s, %s, 1\n" t1 t1 t2 t1 t1
           | ">" -> Printf.sprintf "\tsgt %s, %s, %s\n" t1 t1 t2
-          | ">=" -> Printf.sprintf "\tslt %s, %s, %s\n\txori %s, %s, 1\n" t1 t2 t1 t1 t1
+          | ">=" -> Printf.sprintf "\tslt %s, %s, %s\n\txori %s, %s, 1\n" t1 t1 t2 t1 t1
           | "&&" -> Printf.sprintf "\tand %s, %s, %s\n" t1 t1 t2
           | "||" -> Printf.sprintf "\tor %s, %s, %s\n" t1 t1 t2
           | _ -> failwith ("Unknown binop: " ^ op)
@@ -225,10 +225,8 @@ let com_func_generic (f_name : string) (f_args : string list) (f_body : ir_inst 
         
     | Label label -> Printf.sprintf "%s:\n" label
     | Load _ | Store _ -> " # Load/Store not implemented in this simplified version\n"
-  in
-
-  (* 编译一个基本块 *)
-  let com_block (blk : ir_block) : string =
+  
+  and com_block (blk : ir_block) : string =
     let inst_codes = List.map com_inst blk.insts |> String.concat "" in
     let term_code =
       match blk.terminator with
