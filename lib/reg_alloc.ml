@@ -100,7 +100,7 @@ let allocate_registers (var_map : var_info StringMap.t) : unit =
   (* 分配可用寄存器 *)
   let rec allocate reg_list = function
     | [] -> ()
-    | (var_name, info) :: rest ->
+    | (_, info) :: rest ->  (* 修改：前面添加下划线表示未使用的变量 *)
         match reg_list with
         | [] -> 
             (* 没有可用寄存器，设置为需要溢出 *)
