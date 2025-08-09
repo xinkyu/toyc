@@ -280,31 +280,30 @@ let setup_function_args args =
   List.mapi
     (fun i name ->
       (* 为参数分配存储 *)
-      let storage = 
-        if i < 8 then begin
-          (* 参数已经在寄存器a0-a7中，我们可以直接使用或者移动到其他位置 *)
-          let reg = Printf.sprintf "a%d" i in
-          if is_temp_var name && List.length !reg_pool > 0 then begin
-            (* 临时参数变量，分配一个寄存器 *)
-            let target_reg = List.hd !reg_pool in
-            reg_pool := List.tl !reg_pool;
-            Hashtbl.add v_env name (Register target_reg);
-            Printf.sprintf "\tmv %s, %s\n" target_reg reg
-          end else begin
-            (* 常规参数变量，存储到栈上 *)
-            stack_offset := !stack_offset + 4;
-            Hashtbl.add v_env name (Stack !stack_offset);
-            Printf.sprintf "\tsw %s, %d(sp)\n" reg !stack_offset
-          end
-        else begin
-          (* 超过8个的参数在调用者的栈上 *)
+      if i < 8 then begin
+        (* 参数已经在寄存器a0-a7中，我们可以直接使用或者移动到其他位置 *)
+        let reg = Printf.sprintf "a%d" i in
+        if is_temp_var name && List.length !reg_pool > 0 then begin
+          (* 临时参数变量，分配一个寄存器 *)
+          let target_reg = List.hd !reg_pool in
+          reg_pool := List.tl !reg_pool;
+          Hashtbl.add v_env name (Register target_reg);
+          Printf.sprintf "\tmv %s, %s\n" target_reg reg
+        end else begin
+          (* 常规参数变量，存储到栈上 *)
           stack_offset := !stack_offset + 4;
-          let offset = !stack_offset in
-          Hashtbl.add v_env name (Stack offset);
-          Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
-            (-4 * (i - 8))
-            offset
-        end)
+          Hashtbl.add v_env name (Stack !stack_offset);
+          Printf.sprintf "\tsw %s, %d(sp)\n" reg !stack_offset
+        end
+      end else begin
+        (* 超过8个的参数在调用者的栈上 *)
+        stack_offset := !stack_offset + 4;
+        let offset = !stack_offset in
+        Hashtbl.add v_env name (Stack offset);
+        Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
+          (-4 * (i - 8))
+          offset
+      end)
     args
   |> String.concat ""
 
