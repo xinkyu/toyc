@@ -5,8 +5,8 @@ module StringMap = Map.Make(String)
 module IntMap = Map.Make(Int)
 
 type range = {
-  start_point : int;
-  end_point   : int;
+  mutable start_point : int;
+  mutable end_point   : int;
 }
 
 type live_interval = {
@@ -42,10 +42,11 @@ let number_instructions (func: ir_func_o) : (ir_inst IntMap.t * (string, int * i
   ) func.blocks;
   (!inst_map, block_ranges)
 
-(* FIX: Prefixed unused 'live_in' with an underscore to silence the warning. *)
-let build_intervals (func: ir_func_o) (_live_in: StringSet.t StringMap.t) (live_out: StringSet.t StringMap.t) : live_interval list =
+(* FIX: Rewritten build_intervals for correctness, especially with loops. *)
+let build_intervals (func: ir_func_o) (live_in: StringSet.t StringMap.t) (live_out: StringSet.t StringMap.t) : live_interval list =
   let _, block_ranges = number_instructions func in
   let intervals = Hashtbl.create 100 in
+
   let get_or_create_interval var =
     match Hashtbl.find_opt intervals var with
     | Some i -> i
@@ -54,43 +55,57 @@ let build_intervals (func: ir_func_o) (_live_in: StringSet.t StringMap.t) (live_
         Hashtbl.add intervals var new_i;
         new_i
   in
+
   let add_range var start_p end_p =
     let interval = get_or_create_interval var in
-    interval.ranges <- { start_point = start_p; end_point = end_p } :: interval.ranges
+    match interval.ranges with
+    | r :: rs when r.start_point = end_p -> r.start_point <- start_p; interval.ranges <- r :: rs
+    | _ -> interval.ranges <- { start_point = start_p; end_point = end_p } :: interval.ranges
   in
+
+  let sorted_blocks = List.rev func.blocks in
   List.iter (fun b ->
     let block_start, block_end = Hashtbl.find block_ranges b.label in
     let live = ref (StringMap.find b.label live_out) in
+
+    StringSet.iter (fun var -> add_range var block_start block_end) !live;
+
     let insts_with_ids =
-      let rec assign_ids id = function
-        | [] -> []
-        | inst :: rest -> (id, inst) :: assign_ids (id - 2) rest
-      in
-      assign_ids (block_end - 2) (List.rev b.insts)
+        let rec assign_ids id = function
+            | [] -> []
+            | inst :: rest -> (id, inst) :: assign_ids (id - 2) rest
+        in
+        assign_ids (block_end - 4) (List.rev b.insts)
     in
+
     List.iter (fun (id, inst) ->
-      let _, defs = get_use_def_inst inst in
-      let uses, _ = get_use_def_inst inst in
+      let uses, defs = get_use_def_inst inst in
       StringSet.iter (fun v ->
+        let interval = get_or_create_interval v in
+        let first_range = List.hd interval.ranges in
+        first_range.start_point <- id;
         live := StringSet.remove v !live;
-        add_range v id id;
       ) defs;
       StringSet.iter (fun v ->
-        live := StringSet.add v !live;
         add_range v id id;
+        live := StringSet.add v !live;
       ) uses;
     ) (List.rev insts_with_ids);
-    StringSet.iter (fun v ->
-      add_range v block_start block_end
-    ) !live;
-  ) func.blocks;
+
+    let live_in_b = StringMap.find b.label live_in in
+    StringSet.iter (fun var ->
+        if not (StringSet.mem var !live) then
+            add_range var block_start block_start
+    ) live_in_b;
+
+  ) sorted_blocks;
+
   let final_intervals = Hashtbl.fold (fun _ interval acc ->
     let sorted_ranges = List.sort (fun r1 r2 -> compare r1.start_point r2.start_point) interval.ranges in
     let merged =
       match sorted_ranges with
       | [] -> []
       | hd :: tl ->
-          (* FIX: Made the pattern matching exhaustive to handle the empty list case, satisfying the compiler warning. *)
           List.fold_left (fun acc next ->
             match acc with
             | current :: rest ->
@@ -98,7 +113,7 @@ let build_intervals (func: ir_func_o) (_live_in: StringSet.t StringMap.t) (live_
                   { current with end_point = max current.end_point next.end_point } :: rest
                 else
                   next :: acc
-            | [] -> [next] (* This case is logically unreachable but required by the compiler *)
+            | [] -> [next]
           ) [hd] tl
     in
     interval.ranges <- List.rev merged;
@@ -139,7 +154,10 @@ let linear_scan_allocate (intervals: live_interval list) : (string, allocation_l
     ) else (
       let last_active = List.hd (List.rev !active) in
       if get_end_point last_active > get_end_point current_interval then (
-        let reg_to_reassign = Option.get last_active.assigned_reg in
+        let reg_to_reassign = match last_active.assigned_reg with
+          | Some r -> r
+          | None -> failwith "Active interval must have a register"
+        in
         last_active.assigned_reg <- None;
         Hashtbl.replace allocation_map last_active.var_name (Spilled !spill_count);
         spill_count := !spill_count + 1;
