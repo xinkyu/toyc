@@ -42,7 +42,8 @@ let number_instructions (func: ir_func_o) : (ir_inst IntMap.t * (string, int * i
   ) func.blocks;
   (!inst_map, block_ranges)
 
-let build_intervals (func: ir_func_o) (live_in: StringSet.t StringMap.t) (live_out: StringSet.t StringMap.t) : live_interval list =
+(* FIX: Prefixed unused 'live_in' with an underscore to silence the warning. *)
+let build_intervals (func: ir_func_o) (_live_in: StringSet.t StringMap.t) (live_out: StringSet.t StringMap.t) : live_interval list =
   let _, block_ranges = number_instructions func in
   let intervals = Hashtbl.create 100 in
   let get_or_create_interval var =
@@ -89,16 +90,20 @@ let build_intervals (func: ir_func_o) (live_in: StringSet.t StringMap.t) (live_o
       match sorted_ranges with
       | [] -> []
       | hd :: tl ->
-          List.fold_left (fun (current :: acc) next ->
-            if next.start_point <= current.end_point + 1 then
-              { current with end_point = max current.end_point next.end_point } :: acc
-            else
-              next :: current :: acc
+          (* FIX: Made the pattern matching exhaustive to handle the empty list case, satisfying the compiler warning. *)
+          List.fold_left (fun acc next ->
+            match acc with
+            | current :: rest ->
+                if next.start_point <= current.end_point + 1 then
+                  { current with end_point = max current.end_point next.end_point } :: rest
+                else
+                  next :: acc
+            | [] -> [next] (* This case is logically unreachable but required by the compiler *)
           ) [hd] tl
     in
     interval.ranges <- List.rev merged;
     if interval.ranges <> [] then interval :: acc else acc
-  ) intervals [] (* FIX: Removed stray 'in' keyword here *)
+  ) intervals []
   in
   final_intervals
 
