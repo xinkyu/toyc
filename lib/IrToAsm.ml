@@ -4,6 +4,7 @@ open Ir
 
 let callee_saved = ["s0";"s1";"s2";"s3";"s4";"s5";"s6";"s7";"s8";"s9";"s10";"s11"]
 
+(* 修正后的版本 *)
 let com_func_alloc (f : allocated_func) : string =
   let alloc_map = f.alloc_map in
   let final_stack_size = ref f.stack_size in
@@ -64,8 +65,7 @@ let com_func_alloc (f : allocated_func) : string =
     Printf.sprintf "%s:\n" f.name ^ stack_alloc ^ save_ra ^ save_callee ^ setup_params
   in
 
-  let body =
-    let insts_asm =
+  let body_asm =
       List.map (fun (b: ir_block) ->
         let block_label = Printf.sprintf "%s:\n" b.label in
         let insts_code =
@@ -109,11 +109,11 @@ let com_func_alloc (f : allocated_func) : string =
         let term_code = match b.terminator with
           | TermGoto l -> Printf.sprintf "\tj %s\n" l
           | TermIf (cond, l1, l2) -> load_operand "t0" cond ^ Printf.sprintf "\tbnez t0, %s\n\tj %s\n" l1 l2
-          | TermRet _ -> "" | TermSeq _ -> ""
-        in block_label ^ insts_code ^ term_code
+          | TermRet _ -> ""
+          | TermSeq _ -> ""
+        in
+        block_label ^ insts_code ^ term_code
       ) f.blocks |> String.concat ""
-    in
-    prologue ^ body
   in
 
   let epilogue =
@@ -128,14 +128,15 @@ let com_func_alloc (f : allocated_func) : string =
       in
       let stack_dealloc = Printf.sprintf "\taddi sp, sp, %d\n" !final_stack_size in
       restore_callee ^ restore_ra ^ stack_dealloc ^ "\tret\n"
-    else "\tret\n"
+    else
+      "\tret\n"
   in
-  body ^ epilogue
+  prologue ^ body_asm ^ epilogue
 
 let com_pro (prog : ir_program) : string =
   let header = ".text\n.global main\n" in
   let funcs_asm = match prog with
     | Ir_funcs_alloc funcs -> List.map com_func_alloc funcs |> String.concat "\n"
-    | _ -> failwith "Cannot generate assembly for non-allocated IR"
+    | _ -> failwith "Cannot generate assembly for non-allocated or non-optimized IR"
   in
   header ^ funcs_asm
