@@ -26,8 +26,6 @@ type context = {
   continue_lbl : string option;
 }
 
-module LabelMap = Map.Make (String)
-
 let tempid = ref 0
 let ftemp () =
   let id = !tempid in
@@ -38,7 +36,6 @@ let nameid = ref 0
 let fname base = let id = !nameid in incr nameid; base ^ "_" ^ string_of_int id
 
 let labelid = ref 0
-let irlabid = ref 0
 let flabel () =
   let id = !labelid in
   incr labelid;
@@ -163,47 +160,68 @@ let func_ir (f : func_def) : ir_func =
   let bodycode = match List.rev raw_code with | Label _ :: rest_rev -> List.rev rest_rev | _ -> raw_code in
   { name = f'.func_name; args = f'.params; body = bodycode }
 
-(* --- 全新的、修正后的 pblocks 函数 --- *)
+(* --- 全新的、最终修正版的 pblocks 函数 --- *)
 let pblocks (insts : ir_inst list) : ir_block list =
-  let create_block label insts =
-    let terminator =
-      match List.rev insts with
-      | Ret op :: _ -> TermRet op
-      | Goto l :: _ -> TermGoto l
-      | IfGoto (cond, l) :: rest -> TermIf (cond, l, match rest with Label l' :: _ -> l' | _ -> flabel())
-      | _ -> TermRet None
+    (* Step 1: Create a list of instruction groups, where each group starts with a label. *)
+    let rec group acc current_group = function
+      | [] -> List.rev (current_group :: acc)
+      | Label l :: rest ->
+          let new_acc = if current_group = [] then acc else current_group :: acc in
+          group new_acc [Label l] rest
+      | inst :: rest ->
+          group acc (inst :: current_group) rest
     in
-    let insts' =
-      match terminator with
-      | TermRet _ | TermGoto _ | TermIf _ -> List.rev (List.tl (List.rev insts))
-      | _ -> insts
+    let insts' = match insts with
+      | Label _ :: _ -> insts
+      | _ -> Label "entry" :: insts
     in
-    { label; insts = insts'; terminator; preds = []; succs = [];
-      def = StringSet.empty; use = StringSet.empty; live_in = StringSet.empty; live_out = StringSet.empty;
-    }
-  in
-  let rec group_by_label acc_groups current_insts inst_list =
-    match inst_list with
-    | [] -> List.rev (current_insts :: acc_groups)
-    | Label l :: rest ->
-        let new_groups = List.rev current_insts :: acc_groups in
-        group_by_label new_groups [Label l] rest
-    | inst :: rest ->
-        group_by_label acc_groups (inst :: current_insts) rest
-  in
-  let insts_with_entry = match insts with
-    | Label _ :: _ -> insts
-    | _ -> Label "entry" :: insts
-  in
-  let groups = group_by_label [] [] insts_with_entry in
-  List.map (fun group ->
-    let rev_group = List.rev group in
-    let label = match rev_group with Label l :: _ -> l | _ -> failwith "Block has no label" in
-    create_block label rev_group
-  ) groups
+    let groups_rev = group [] [] insts' in
+
+    (* Step 2: Create a temporary map of labels to instruction lists. *)
+    let block_map =
+      List.fold_left (fun map group_rev ->
+        match List.rev group_rev with
+        | Label l :: insts -> StringMap.add l insts map
+        | _ -> map
+      ) StringMap.empty groups_rev
+    in
+    let block_labels = List.map (fun g -> match List.rev g with Label l :: _ -> l | _ -> "") groups_rev in
+
+    (* Step 3: Iterate through the labels to build blocks, determining terminators by looking ahead. *)
+    let rec build_blocks = function
+      | [] -> []
+      | [label] -> (* Last block *)
+          let insts = StringMap.find label block_map in
+          let terminator = match List.rev insts with
+            | Ret op :: _ -> TermRet op
+            | Goto l :: _ -> TermGoto l
+            | IfGoto _ :: _ -> failwith "IfGoto cannot be the last inst of a function"
+            | _ -> TermRet None
+          in
+          let final_insts = match List.rev insts with
+            | Ret _ :: r | Goto _ :: r | IfGoto _ :: r -> List.rev r
+            | _ -> insts
+          in
+          [{label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty}]
+      | label :: (next_label :: rest) ->
+          let insts = StringMap.find label block_map in
+          let terminator = match List.rev insts with
+            | Ret op :: _ -> TermRet op
+            | Goto l :: _ -> TermGoto l
+            | IfGoto (cond, l) :: _ -> TermIf (cond, l, next_label)
+            | _ -> TermSeq next_label
+          in
+          let final_insts = match List.rev insts with
+            | Ret _ :: r | Goto _ :: r | IfGoto _ :: r -> List.rev r
+            | _ -> insts
+          in
+          let block = {label; insts=final_insts; terminator; preds=[]; succs=[]; def=StringSet.empty; use=StringSet.empty; live_in=StringSet.empty; live_out=StringSet.empty} in
+          block :: build_blocks (next_label :: rest)
+    in
+    build_blocks block_labels
 
 let func_iro (f : func_def) : allocated_func =
-  labelid := 0; irlabid := 0;
+  labelid := 0;
   let init_map = List.fold_left (fun m name -> Env.add name (Var name) m) Env.empty f.params in
   let ctx0 = { env_stack = ref [init_map]; break_lbl = None; continue_lbl = None } in
   let bodycode = stmt_res ctx0 (Block f.body) |> flatten in
