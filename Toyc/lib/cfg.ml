@@ -112,8 +112,7 @@ let process_inst env inst =
       Store (addr', value'), env
 
   | IfGoto (cond, label) ->
-      let cond' = eval_operand env cond in
-      IfGoto (cond', label), env
+      IfGoto (eval_operand env cond, label), env
 
   | Ret op_opt ->
       Ret (Option.map (eval_operand env) op_opt), env
@@ -122,9 +121,7 @@ let process_inst env inst =
 
 let process_terminator env term =
   match term with
-  | TermIf (cond, l1, l2) -> 
-      let cond' = eval_operand env cond in
-      TermIf (cond', l1, l2)
+  | TermIf (cond, l1, l2) -> TermIf (eval_operand env cond, l1, l2)
   | TermRet o -> TermRet (Option.map (eval_operand env) o)
   | TermGoto _ | TermSeq _ as t -> t
 
@@ -173,7 +170,6 @@ let build_cfg (blocks : ir_block list) : ir_block list =
   ) reachable;
   reachable
 
-(* 增强的常量传播，更好地处理分支 *)
 let constant_propagation (blocks : ir_block list) : ir_block list =
   let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
   let in_envs = ref StringMap.empty in
@@ -208,54 +204,5 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
   done;
   blocks
 
-(* 新增: 强度削减优化 *)
-let strength_reduction (blocks : ir_block list) : ir_block list =
-  (* 判断一个整数是否是2的幂 *)
-  let is_power_of_2 n =
-    n > 0 && (n land (n - 1)) = 0
-  in
-  
-  (* 计算一个2的幂数的对数（即2^result = n） *)
-  let log2 n =
-    let rec aux i n =
-      if n = 1 then i
-      else aux (i + 1) (n asr 1)
-    in
-    aux 0 n
-  in
-  
-  (* 处理每个指令 *)
-  let optimize_inst inst =
-    match inst with
-    | Binop ("*", dst, src1, src2) -> (
-        (* 乘法优化: x * 2^n => x << n *)
-        match src1, src2 with
-        | _, Imm n when is_power_of_2 n ->
-            let shift = log2 n in
-            Binop ("<<", dst, src1, Imm shift)
-        | Imm n, _ when is_power_of_2 n ->
-            let shift = log2 n in
-            Binop ("<<", dst, src2, Imm shift)
-        | _ -> inst
-      )
-    | Binop ("/", dst, src1, Imm n) when is_power_of_2 n ->
-        (* 除法优化: x / 2^n => x >> n *)
-        let shift = log2 n in
-        Binop (">>", dst, src1, Imm shift)
-    | _ -> inst
-  in
-  
-  (* 应用于所有基本块 *)
-  List.iter (fun blk ->
-    blk.insts <- List.map optimize_inst blk.insts
-  ) blocks;
-  
-  blocks
-
-(* 增强的优化流程 *)
 let optimize blocks =
-  blocks 
-  |> build_cfg 
-  |> constant_propagation
-  |> strength_reduction  (* 新增强度削减优化 *)
-  |> build_cfg  (* 最后再次构建CFG，确保清理所有不可达块 *)
+  blocks |> build_cfg |> constant_propagation
