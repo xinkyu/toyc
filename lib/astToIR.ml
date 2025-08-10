@@ -1,4 +1,4 @@
-(* astToIR.ml *)
+(*astToIR.ml*)
 open Ast
 open Ir
 
@@ -103,7 +103,8 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
             match op with
             | Plus -> Imm n (* +n = n *)
             | Minus -> Imm (-n) (* -n *)
-            | Not -> Imm (if n = 0 then 1 else 0) (* !n *)
+            | Not -> Imm (if n = 0 then 1 else 0)
+            (* !n *)
           in
           (folded, code)
       | _ ->
@@ -116,8 +117,8 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
       let l_end = flabel() in
       let v1, c1 = expr_ir ctx e1 in
       let code = c1 @ [
-          IfGoto(v1, l_rhs); (* If e1 is non-zero, check e2 *)
-          Assign(res, Imm(0)); (* Else, result is 0 *)
+          IfGoto(v1, l_rhs);      (* If e1 is non-zero, check e2 *)
+          Assign(res, Imm(0));    (* Else, result is 0 *)
           Goto(l_end);
           Label(l_rhs);
       ] in
@@ -137,12 +138,13 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
       let l_end = flabel() in
       let v1, c1 = expr_ir ctx e1 in
       let code = c1 @ [
-          IfGoto(v1, l_true); (* If e1 is non-zero, result is 1 *)
-          Goto(l_rhs); (* Else, check e2 *)
+          IfGoto(v1, l_true);      (* If e1 is non-zero, result is 1 *)
+          Goto(l_rhs);             (* Else, check e2 *)
       ] in
       let v2, c2 = expr_ir ctx e2 in
       let temp_bool = ftemp() in
-      let code = code @ [Label(l_rhs)] @ c2 @ [
+      let code = code @ c2 @ [
+          Label(l_rhs);
           Binop("!=", temp_bool, v2, Imm(0)); (* Convert v2 to boolean *)
           Assign(res, temp_bool);
           Goto(l_end);
@@ -163,8 +165,8 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
             | Add -> Imm (a + b)
             | Sub -> Imm (a - b)
             | Mul -> Imm (a * b)
-            | Div -> if b != 0 then Imm (a/b) else Imm 0 (* Avoid division by zero *)
-            | Mod -> if b != 0 then Imm (a mod b) else Imm 0 (* Avoid division by zero *)
+            | Div -> Imm (a / b)
+            | Mod -> Imm (a mod b)
             | Eq -> Imm (if a = b then 1 else 0)
             | Neq -> Imm (if a <> b then 1 else 0)
             | Less -> Imm (if a < b then 1 else 0)
@@ -266,9 +268,11 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
       Returned (c @ [ Ret (Some v) ])
   | If (cond, tstmt, Some fstmt) -> (
       let cnd, cc = expr_ir ctx cond in
-      let lthen = flabel () and lelse = flabel () and lend = flabel () in
-      let then_res = stmt_res ctx tstmt in
-      let else_res = stmt_res ctx fstmt in
+      let lthen = flabel ()
+      and lelse = flabel ()
+      and lend = flabel () in
+      let then_res = stmt_res ctx tstmt
+      and else_res = stmt_res ctx fstmt in
       let raw_then = flatten then_res in
       let then_code =
         if ends raw_then then raw_then
@@ -282,9 +286,8 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
       let code =
         cc
         @ [ IfGoto (cnd, lthen); Goto lelse ]
-        @ [ Label lthen ] @ then_code
-        @ [ Label lelse ] @ else_code
-        @ if not (ends then_code && ends else_code) then [ Label lend ] else []
+        @ [ Label lthen ] @ then_code @ [ Label lelse ] @ else_code
+        @ [ Label lend ]
       in
       Normal code)
   | If (cond, tstmt, None) ->
@@ -300,8 +303,12 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
       Normal code
   | While (cond, body) ->
       (* 循环标签 *)
-      let lcond = flabel () and lbody = flabel () and lend = flabel () in
-      let ctx_loop = { ctx with break_lbl = Some lend; continue_lbl = Some lcond } in
+      let lcond = flabel ()
+      and lbody = flabel ()
+      and lend = flabel () in
+      let ctx_loop =
+        { ctx with break_lbl = Some lend; continue_lbl = Some lcond }
+      in
       let cnd, ccode = expr_ir ctx_loop cond in
       let body_res = stmt_res ctx_loop body in
       let bcode = flatten body_res in
@@ -311,6 +318,7 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
         @ [ IfGoto (cnd, lbody); Goto lend ]
         @ [ Label lbody ] @ bcode @ [ Goto lcond; Label lend ]
       in
+      (* 无法从循环体中直接 return：若想支持可在 body_res 捕获 *)
       Normal code
   | Break -> (
       match ctx.break_lbl with
@@ -341,22 +349,25 @@ let func_ir (f : func_def) : ir_func =
     | _        -> f.body
   in
   let f' = { f with body = des_body } in
+  (* 初始化 env: 参数映射 *)
   let init_env =
     List.fold_left (fun m x -> Env.add x (Var x) m) Env.empty f'.params
   in
   let ctx0 = { env_stack = ref [init_env]; break_lbl = None; continue_lbl = None } in
+  (* 翻译函数体 *)
   let body_res = stmt_res ctx0 (Block f'.body) in
+  (* 先拿到全部 IR 指令 *)
   let raw_code = flatten body_res in
+  (* 如果末尾恰好是一个孤立 Label，就把它丢掉 *)
   let bodycode =
     match List.rev raw_code with
     | Label _ :: rest_rev -> List.rev rest_rev
     | _ -> raw_code
   in
+  (* Add a default return 0 for main if it falls off the end *)
   let final_bodycode =
     if f'.func_name = "main" && not (ends bodycode) then
       bodycode @ [Ret (Some (Imm 0))]
-    else if not (ends bodycode) then
-      bodycode @ [Ret None]
     else
       bodycode
   in
@@ -366,86 +377,96 @@ let func_ir (f : func_def) : ir_func =
 let pblocks (insts : ir_inst list) : ir_block list =
   let rec split acc curr label labelmap insts =
     match insts with
-    | [] ->
-        (match curr with
-        | [] -> List.rev acc
-        | _ ->
-          let final_block = {
-            label = label;
-            insts = List.rev curr;
-            terminator = TermRet None; (* Assuming falloff is a return *)
-            preds = [];
-            succs = [];
-          } in
-          List.rev (final_block :: acc))
-    | Label l :: rest ->
-        let next_label, labelmap' = fIRlabel labelmap l in
-        (match curr with
+    | [] -> 
+        List.rev acc
+        (*| _ -> failwith "Basic block must end with a terminator")*)
+    | Label l :: rest -> (
+        (* 当前块结束，开启新块 *)
+        match curr with
         | [] ->
-            split acc [] next_label labelmap' rest
+            let next_label, labelmap' = fIRlabel labelmap l in
+            split acc [ Label l ] next_label labelmap' rest
         | _ ->
-            let blk = {
-              label;
-              insts = List.rev curr;
-              terminator = TermSeq next_label;
-              preds = [];
-              succs = [];
-            } in
-            split (blk :: acc) [] next_label labelmap' rest)
+            let next_label, labelmap' = fIRlabel labelmap l in
+            let blk =
+              {
+                label;
+                insts = List.rev curr;
+                terminator = TermSeq next_label;
+                preds = [];
+                succs = [];
+              }
+            in
+            let acc' = blk :: acc in
+            split acc' [ Label l ] next_label labelmap' rest)
     | Goto l :: rest ->
         let goto_label, labelmap' = fIRlabel labelmap l in
-        let blk = {
-          label;
-          insts = List.rev curr;
-          terminator = TermGoto goto_label;
-          preds = [];
-          succs = [];
-        } in
-        split (blk :: acc) [] goto_label labelmap' rest
+        (* 刷新一个无意义的 blk, 确保编程者不会出现的 label *)
+        let next_label, labelmap'' =
+          fIRlabel labelmap' ("__blk" ^ string_of_int !irlabid)
+        in
+        let blk =
+          {
+            label;
+            insts = List.rev (Goto l :: curr);
+            terminator = TermGoto goto_label;
+            preds = [];
+            succs = [];
+          }
+        in
+        split (blk :: acc) [] next_label labelmap'' rest
     | IfGoto (cond, l) :: rest ->
         let then_label, labelmap' = fIRlabel labelmap l in
         let else_label, labelmap'' =
-          if rest <> [] then
-            match List.hd rest with
-            | Label l_else -> fIRlabel labelmap' l_else
-            | _ -> fIRlabel labelmap' ("__else" ^ string_of_int !irlabid)
-          else fIRlabel labelmap' ("__falloff" ^ string_of_int !irlabid)
+          fIRlabel labelmap' ("__else" ^ string_of_int !irlabid)
         in
-        let blk = {
-          label;
-          insts = List.rev curr;
-          terminator = TermIf (cond, then_label, else_label);
-          preds = [];
-          succs = [];
-        } in
+        let blk =
+          {
+            label;
+            insts = List.rev (IfGoto (cond, l) :: curr);
+            terminator = TermIf (cond, then_label, else_label);
+            preds = [];
+            succs = [];
+          }
+        in
         split (blk :: acc) [] else_label labelmap'' rest
     | Ret op :: rest ->
-        let blk = {
-          label;
-          insts = List.rev curr;
-          terminator = TermRet op;
-          preds = [];
-          succs = [];
-        } in
-        let next_label, labelmap' = fIRlabel labelmap ("__ret_falloff" ^ string_of_int !irlabid) in
+        let next_label, labelmap' =
+          fIRlabel labelmap ("__ret" ^ string_of_int !irlabid)
+        in
+        let blk =
+          {
+            label;
+            insts = List.rev (Ret op :: curr);
+            terminator = TermRet op;
+            preds = [];
+            succs = [];
+          }
+        in
         split (blk :: acc) [] next_label labelmap' rest
     | inst :: rest -> split acc (inst :: curr) label labelmap rest
   in
-  match insts with
-  | [] -> []
-  | Label l :: rest ->
-      let entry_label, labelmap = fIRlabel LabelMap.empty l in
-      split [] [] entry_label labelmap rest
-  | _ ->
-      let entry_label, labelmap = fIRlabel LabelMap.empty "entry" in
-      split [] [] entry_label labelmap insts
-
+  (* 确保用户不使用 entry 标签 *)
+  let entry_label, labelmap = fIRlabel LabelMap.empty "entry" in
+  split [] [] entry_label labelmap insts
 
 (* 优化版本的 ir 控制块 *)
 let func_iro (f : func_def) : ir_func_o =
-  let linear_func = func_ir f in
-  let linear_ir = linear_func.body in
+  let init_map =
+    List.fold_left
+      (fun m name -> Env.add name (Var name) m)
+      Env.empty f.params
+  in
+   let ctx0 = { env_stack = ref [init_map]; break_lbl = None; continue_lbl = None } in
+  let bodycode = stmt_res ctx0 (Block f.body) |> flatten in
+  let linear_ir =
+    (* 额外处理孤立的 label *)
+    match List.rev bodycode with
+    | Label _ :: rest_rev -> List.rev rest_rev
+    | _ -> bodycode
+  in
   let raw_blocks = pblocks linear_ir in
+  (* 构建前驱/后继关系，并剔除空块/重复块 *)
   let cfg_blocks = Cfg.build_cfg raw_blocks in
   let opt_blocks = Cfg.optimize cfg_blocks in
   { name = f.func_name; args = f.params; blocks = opt_blocks }
