@@ -117,22 +117,8 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
   let free_registers = ref available_registers in
   let spill_offset = ref 0 in
 
-  (* 为函数参数预先分配寄存器 *)
-  let pre_allocate_args args =
-    List.iteri (fun i arg ->
-      if i < 8 && List.length !free_registers > 0 then
-        (* 把前8个参数分配到寄存器 *)
-        let reg = List.hd !free_registers in
-        free_registers := List.tl !free_registers;
-        Hashtbl.add allocation_map arg (PhysicalRegister reg)
-      else
-        (* 其余参数溢出到栈上 *)
-        begin
-          spill_offset := !spill_offset + 4;
-          Hashtbl.add allocation_map arg (StackSlot !spill_offset)
-        end
-    ) args
-  in
+  (* 删除未使用的函数定义 *)
+  (* let pre_allocate_args args = ... *)
 
   (* 遍历每个活跃区间进行分配 *)
   List.iter (fun current_interval ->
