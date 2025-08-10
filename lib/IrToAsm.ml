@@ -1,6 +1,5 @@
 (* IrToAsm.ml *)
 open Ir
-open Liveness
 open LinearScan
 
 (*******************************************************************)
@@ -125,7 +124,6 @@ let com_block_o (blk : ir_block) allocation_map spill_base_offset : string =
   blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset) |> String.concat ""
 
 let com_func_o (f : ir_func_o) : string =
-  let _, live_out = Liveness.analyze f in
   let intervals = LinearScan.build_intervals f in
   let allocation_map, num_spills = LinearScan.allocate intervals in
   let caller_save_area = List.length available_registers * 4 in
@@ -176,7 +174,7 @@ let com_func_non_opt (f : ir_func) : string =
     | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
     | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
   in
-  let rec com_inst_non_opt (inst : ir_inst) : string =
+  let com_inst_non_opt (inst : ir_inst) : string =
     match inst with
     | Binop (op, dst, lhs, rhs) ->
         let dst_off = all_st (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst") in
