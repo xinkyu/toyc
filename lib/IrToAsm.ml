@@ -138,7 +138,7 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
   | IfGoto (cond, label) ->
       let cond_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" cond in
       cond_code ^ Printf.sprintf "\tbne %s, x0, %s\n" reg label
-  | Label label -> Printf.sprintf "%s:\n" label
+  | Label _ -> "" (* The block's label is now the source of truth *)
   | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
 
 let com_block_o (blk : ir_block) allocation_map spill_base_offset caller_save_base epilogue_label : string =
@@ -304,17 +304,4 @@ let com_func_non_opt (f : ir_func) : string =
     else body_code
   in
   let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -1600\n" f.name in
-  prologue ^ pae_set ^ body_code
-
-(*******************************************************************)
-(* Program Entry Point *) 
-(*******************************************************************)
-
-let com_pro (prog : ir_program) : string =
-  let prologue = ".text\n.global main\n" in
-  let body_asm =
-    match prog with
-    | Ir_funcs funcs -> List.map com_func_non_opt funcs |> String.concat "\n"
-    | Ir_funcs_o funcs_o -> List.map com_func_o funcs_o |> String.concat "\n"
-  in
-  prologue ^ body_asm
+  prologue ^ pae_se
