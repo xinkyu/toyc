@@ -64,12 +64,12 @@ let apply_cse (block : ir_block) : ir_block =
   (* 第一遍：收集所有表达式 *)
   List.iter (fun inst ->
     match inst with
-    | Binop (op, dst, lhs, rhs) when is_defined lhs && is_defined rhs ->
+    | Binop (_, dst, lhs, rhs) when is_defined lhs && is_defined rhs ->
         let sig_opt = make_signature inst in
         (match sig_opt with
         | Some signature -> Hashtbl.replace expr_map signature dst
         | None -> ())
-    | Unop (op, dst, src) when is_defined src ->
+    | Unop (_, dst, src) when is_defined src ->
         let sig_opt = make_signature inst in
         (match sig_opt with
         | Some signature -> Hashtbl.replace expr_map signature dst
@@ -80,7 +80,7 @@ let apply_cse (block : ir_block) : ir_block =
   (* 第二遍：应用优化，但只对安全的情况 *)
   let process_inst inst =
     match inst with
-    | Binop (op, dst, lhs, rhs) as binop when is_defined lhs && is_defined rhs ->
+    | Binop (_, dst, lhs, rhs) as binop when is_defined lhs && is_defined rhs ->
         let sig_opt = make_signature binop in
         (match sig_opt with
         | Some signature ->
@@ -90,7 +90,7 @@ let apply_cse (block : ir_block) : ir_block =
                 Assign (dst, existing_reg)
             | _ -> inst)
         | None -> inst)
-    | Unop (op, dst, src) as unop when is_defined src ->
+    | Unop (_, dst, src) as unop when is_defined src ->
         let sig_opt = make_signature unop in
         (match sig_opt with
         | Some signature ->
