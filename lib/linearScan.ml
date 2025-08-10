@@ -13,7 +13,7 @@ type interval = { var_name: string; start: int; finish: int; }
   This version uses the results of the dataflow-based liveness analysis.
 *)
 let build_intervals (func: ir_func_o) : interval list =
-  let live_in, _ = Liveness.analyze func in
+  let live_in, live_out = Liveness.analyze func in
   let usage_map = ref VarMap.empty in
   let inst_num = ref 0 in
 
@@ -25,17 +25,21 @@ let build_intervals (func: ir_func_o) : interval list =
 
   (* 1. For each instruction, find all variables that are live *)
   List.iter (fun block ->
-    let live = ref (LabelMap.find block.label live_in) in
-    List.iter (fun inst ->
-      (* A variable is live at this point if it's in the live-in set *)
-      VSet.iter (fun var -> add_usage var !inst_num) !live;
-
-      (* Update the live set for the next instruction in the block *)
+    let live = ref (LabelMap.find block.label live_out) in
+    List.iteri (fun i _ ->
+      let inst = List.nth block.insts (List.length block.insts - 1 - i) in
+      let current_pos = !inst_num + (List.length block.insts - 1 - i) in
+      
       let def, use = Liveness.def_use inst in
-      live := VSet.union use (VSet.diff !live def);
+      
+      (* Any variable in live_out or use is live at this point *)
+      VSet.iter (fun v -> add_usage v current_pos) !live;
+      VSet.iter (fun v -> add_usage v current_pos) use;
 
-      inst_num := !inst_num + 1
-    ) block.insts
+      (* Update the live set for the next instruction (previous in block) *)
+      live := VSet.union use (VSet.diff !live def);
+    ) block.insts;
+    inst_num := !inst_num + (List.length block.insts)
   ) func.blocks;
 
   (* 2. For each variable, create an interval from its min to max usage point *)
