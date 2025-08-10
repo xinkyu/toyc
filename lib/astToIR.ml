@@ -112,43 +112,38 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
           (res, code @ [ Unop (string_unop op, res, operand) ]))
   
   | Binop (Land, e1, e2) ->
-      let res = ftemp() in
-      let l_rhs = flabel() in
-      let l_end = flabel() in
+      let res = ftemp () in
+      let l_rhs = flabel () in
+      let l_end = flabel () in
       let v1, c1 = expr_ir ctx e1 in
       let code = c1 @ [
-          IfGoto(v1, l_rhs);      (* If e1 is non-zero, check e2 *)
-          Assign(res, Imm(0));    (* Else, result is 0 *)
+          IfGoto(v1, l_rhs);
+          Assign(res, Imm(0));
           Goto(l_end);
           Label(l_rhs);
       ] in
       let v2, c2 = expr_ir ctx e2 in
-      let temp_bool = ftemp() in
       let code = code @ c2 @ [
-          Binop("!=", temp_bool, v2, Imm(0)); (* Convert v2 to boolean 0 or 1 *)
-          Assign(res, temp_bool);
+          Binop("!=", res, v2, Imm(0));  (* 直接赋值给res *)
           Label(l_end);
       ] in
       (res, code)
 
   | Binop (Lor, e1, e2) ->
-      let res = ftemp() in
-      let l_rhs = flabel() in
-      let l_true = flabel() in
-      let l_end = flabel() in
+      let res = ftemp () in
+      let l_rhs = flabel () in
+      let l_true = flabel () in
+      let l_end = flabel () in
       let v1, c1 = expr_ir ctx e1 in
       let code = c1 @ [
-          IfGoto(v1, l_true);      (* If e1 is non-zero, result is 1 *)
-          Goto(l_rhs);             (* Else, check e2 *)
+          IfGoto(v1, l_true);
+          Goto(l_rhs);
       ] in
       let v2, c2 = expr_ir ctx e2 in
-      let temp_bool = ftemp() in
       let code = code @ c2 @ [
           Label(l_rhs);
-          Binop("!=", temp_bool, v2, Imm(0)); (* Convert v2 to boolean *)
-          Assign(res, temp_bool);
+          Binop("!=", res, v2, Imm(0));  (* 直接赋值给res *)
           Goto(l_end);
-
           Label(l_true);
           Assign(res, Imm(1));
           Label(l_end);

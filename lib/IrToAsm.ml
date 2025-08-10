@@ -89,14 +89,15 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" src in
       let store_code = store_operand allocation_map spill_base_offset reg1 dst in
       code1 ^ store_code
-  | Call (dst, fname, args) ->
-      (* 1. Identify which physical registers are currently active and need saving *)
+   | Call (dst, fname, args) ->
+      (* 添加t5,t6到必须保存的寄存器列表 *)
       let active_phys_regs =
         Hashtbl.fold (fun _ alloc acc ->
           match alloc with
           | PhysicalRegister r -> if List.mem r available_registers then r :: acc else acc
           | StackSlot _ -> acc
         ) allocation_map []
+        |> List.append ["t5"; "t6"]  (* 关键修复 *)
         |> List.sort_uniq compare
       in
       
