@@ -90,34 +90,43 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
       let store_code = store_operand allocation_map spill_base_offset reg1 dst in
       code1 ^ store_code
   | Call (dst, fname, args) ->
-      (* 1. Save caller-saved registers to the designated area in our frame *)
+      (* 1. Identify which physical registers are currently active and need saving *)
+      let active_phys_regs =
+        Hashtbl.fold (fun _ alloc acc ->
+          match alloc with
+          | PhysicalRegister r -> if List.mem r available_registers then r :: acc else acc
+          | StackSlot _ -> acc
+        ) allocation_map []
+        |> List.sort_uniq compare
+      in
+      
+      (* 2. Save these active registers to the caller-save area *)
       let save_callers =
         List.mapi (fun i r -> Printf.sprintf "\tsw %s, %d(sp)\n" r (caller_save_base + i*4))
-        available_registers
+        active_phys_regs
         |> String.concat ""
       in
 
-      (* 2. Set up arguments for the call *)
+      (* 3. Set up arguments for the call *)
       let args_code =
         List.mapi (fun i arg ->
           if i < 8 then
             load_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) arg
           else
-            (* Place stack arguments in the outgoing area at the top of our frame *)
             let arg_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" arg in
             arg_code ^ Printf.sprintf "\tsw %s, %d(sp)\n" reg ((i-8)*4)
         ) args
         |> String.concat ""
       in
 
-      (* 3. Restore caller-saved registers after the call returns *)
+      (* 4. Restore the active registers after the call returns *)
       let restore_callers =
         List.mapi (fun i r -> Printf.sprintf "\tlw %s, %d(sp)\n" r (caller_save_base + i*4))
-        available_registers
+        active_phys_regs
         |> String.concat ""
       in
 
-      (* 4. Store the result from a0 into its final destination *)
+      (* 5. Store the result from a0 into its final destination *)
       let store_result = store_operand allocation_map spill_base_offset "a0" dst in
 
       save_callers ^ args_code ^ Printf.sprintf "\tcall %s\n" fname ^ restore_callers ^ store_result
