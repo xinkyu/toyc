@@ -4,16 +4,14 @@ open Ir
 module VarMap = Map.Make(String)
 
 (* An interval is a range [start, end] *)
-module Interval = struct
-  type t = { var_name: string; start: int; finish: int; }
-end
+type interval = { var_name: string; start: int; finish: int; }
 
 (* 
   Build live intervals for all variables in a function.
   This is a simplified approach where an interval is the range from the first
   to the last instruction where a variable appears (is defined or used).
 *)
-let build_intervals (func: ir_func_o) : Interval.t list =
+let build_intervals (func: ir_func_o) : interval list =
   let usage_map = ref VarMap.empty in
   let inst_num = ref 0 in
 
@@ -38,7 +36,7 @@ let build_intervals (func: ir_func_o) : Interval.t list =
     if uses = [] then acc
     else
       let sorted_uses = List.sort_uniq compare uses in
-      let new_interval = { 
+      let new_interval : interval = { 
         var_name = var;
         start = List.hd sorted_uses; 
         finish = List.hd (List.rev sorted_uses);
@@ -55,7 +53,7 @@ type allocation_result =
    t6 will be reserved for temporary values during instruction translation. *)
 let available_registers = ["t0"; "t1"; "t2"; "t3"; "t4"; "t5"]
 
-let allocate (intervals: Interval.t list) : (string, allocation_result) Hashtbl.t * int =
+let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t * int =
   (* The final mapping from variable name to its location *)
   let allocation_map = Hashtbl.create (List.length intervals) in
   
@@ -69,7 +67,7 @@ let allocate (intervals: Interval.t list) : (string, allocation_result) Hashtbl.
   List.iter (fun current_interval ->
     (* 1. Expire old intervals in active list *)
     let new_active = ref [] in
-    List.iter (fun (active_interval:Interval.t) ->
+    List.iter (fun (active_interval:interval) ->
       if active_interval.finish >= current_interval.start then
         (* This interval is still active, keep it *)
         new_active := active_interval :: !new_active
