@@ -2,16 +2,18 @@
 open Ir
 
 module VarMap = Map.Make(String)
+module VSet = Liveness.VSet
+module LabelMap = Liveness.LabelMap
 
 (* An interval is a range [start, end] *)
 type interval = { var_name: string; start: int; finish: int; }
 
 (* 
   Build live intervals for all variables in a function.
-  This is a simplified approach where an interval is the range from the first
-  to the last instruction where a variable appears (is defined or used).
+  This version uses the results of the dataflow-based liveness analysis.
 *)
 let build_intervals (func: ir_func_o) : interval list =
+  let live_in, _ = Liveness.analyze func in
   let usage_map = ref VarMap.empty in
   let inst_num = ref 0 in
 
@@ -21,12 +23,17 @@ let build_intervals (func: ir_func_o) : interval list =
     usage_map := VarMap.add var (pos :: current_uses) !usage_map
   in
 
-  (* 1. Iterate through all instructions and record all usages *)
+  (* 1. For each instruction, find all variables that are live *)
   List.iter (fun block ->
+    let live = ref (LabelMap.find block.label live_in) in
     List.iter (fun inst ->
+      (* A variable is live at this point if it's in the live-in set *)
+      VSet.iter (fun var -> add_usage var !inst_num) !live;
+
+      (* Update the live set for the next instruction in the block *)
       let def, use = Liveness.def_use inst in
-      let all_vars = Liveness.VSet.union def use in
-      Liveness.VSet.iter (fun v -> add_usage v !inst_num) all_vars;
+      live := VSet.union use (VSet.diff !live def);
+
       inst_num := !inst_num + 1
     ) block.insts
   ) func.blocks;
