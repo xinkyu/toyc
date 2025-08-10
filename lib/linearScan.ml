@@ -8,6 +8,11 @@ module LabelMap = Liveness.LabelMap
 (* An interval is a range [start, end] *)
 type interval = { var_name: string; start: int; finish: int; }
 
+(* Helper function to extract variable name from operand *)
+let get_name = function
+  | Var s | Reg s -> Some s
+  | Imm _ -> None
+
 (* 
  Build live intervals for all variables in a function.
  This version uses the results of the dataflow-based liveness analysis.
@@ -94,10 +99,6 @@ let build_intervals (func: ir_func_o) : interval list =
       new_interval :: acc
   ) !usage_map []
 
-and get_name = function
-  | Var s | Reg s -> Some s
-  | Imm _ -> None
-
 type allocation_result =
 | PhysicalRegister of string
 | StackSlot of int
@@ -117,23 +118,6 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
   let active = ref [] in
   let free_registers = ref available_registers in
   let spill_offset = ref 0 in
-
-  (* 为函数参数预先分配寄存器 *)
-  let pre_allocate_args args =
-    List.iteri (fun i arg ->
-      if i < 8 && i < List.length available_registers then
-        (* 把前8个参数分配到寄存器，优先使用 a0-a7，但考虑到调用约定，我们使用t0-t5 *)
-        let reg = List.nth available_registers i in
-        Hashtbl.add allocation_map arg (PhysicalRegister reg);
-        free_registers := List.filter (fun r -> r <> reg) !free_registers
-      else
-        (* 其余参数溢出到栈上 *)
-        begin
-          spill_offset := !spill_offset + 4;
-          Hashtbl.add allocation_map arg (StackSlot !spill_offset)
-        end
-    ) args
-  in
 
   (* 遍历每个活跃区间进行分配 *)
   List.iter (fun current_interval ->
@@ -167,7 +151,6 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
     end else begin
       (* 没有空闲寄存器，必须溢出 *)
       (* 我们采用一个简单的策略：总是溢出当前区间 *)
-      (* 更复杂的策略可能会溢出一个结束时间更晚的活跃区间 *)
       spill_offset := !spill_offset + 4;
       Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset);
     end;
