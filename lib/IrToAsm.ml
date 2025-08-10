@@ -77,8 +77,8 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" src in
       let op_code =
         match op with
-        | "-" -> "\tneg t5, t5\n"
-        | "!" -> "\tseqz t5, t5\n"
+        | "-" -> Printf.sprintf "\tneg t5, %s\n" reg1
+        | "!" -> Printf.sprintf "\tseqz t5, %s\n" reg1
         | "+" -> ""
         | _ -> failwith ("Unknown unop: " ^ op)
       in
@@ -142,7 +142,8 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
   | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
 
 let com_block_o (blk : ir_block) allocation_map spill_base_offset caller_save_base epilogue_label : string =
-  blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat ""
+  (blk.label |> Printf.sprintf "%s:\n") ^
+  (blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat "")
 
 let com_func_o (f : ir_func_o) : string =
   let intervals = LinearScan.build_intervals f in
@@ -209,6 +210,7 @@ let com_func_non_opt (f : ir_func) : string =
   let v_env = Hashtbl.create 1600 in
   let stack_offset = ref 0 in
   let get_sto var = try Hashtbl.find v_env var with Not_found -> failwith ("Unknown variable: " ^ var) in
+  
   let all_st var =
     try get_sto var
     with _ ->
