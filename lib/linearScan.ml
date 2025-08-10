@@ -80,43 +80,39 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
       else
         match Hashtbl.find allocation_map active_interval.var_name with
         | PhysicalRegister reg -> free_registers := reg :: !free_registers
-        | StackSlot _ -> () (* Should not happen in active list *)
+        | StackSlot _ -> ()
     ) !active;
     active := List.sort (fun a b -> compare a.finish b.finish) !new_active;
 
     (* 2. Try to allocate a register or spill *)
     if (List.length !free_registers) > 0 then begin
-      (* Allocate a free register *)
       let reg = List.hd !free_registers in
       free_registers := List.tl !free_registers;
       Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
       active := List.sort (fun a b -> compare a.finish b.finish) (current_interval :: !active)
     end else begin
       (* No free registers, must spill. *)
-      let spill_candidate = List.hd (List.rev !active) in (* Last element in active ends latest *)
-      
-      if spill_candidate.finish > current_interval.finish then
-        (* Spill the active interval that ends latest *)
-        let reg_to_free =
-          match Hashtbl.find allocation_map spill_candidate.var_name with
-          | PhysicalRegister r -> r
-          | StackSlot _ -> failwith "Logic error: Active interval chosen for spilling must have a physical register"
-        in
-        
-        (* Update allocation: spill_candidate goes to stack, current_interval gets the freed register *)
-        spill_offset := !spill_offset + 4;
-        Hashtbl.replace allocation_map spill_candidate.var_name (StackSlot !spill_offset);
-        Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg_to_free);
-        
-        (* Update active list: remove the spilled interval, add the new one, and re-sort *)
-        let updated_active = current_interval :: (List.filter (fun i -> i.var_name <> spill_candidate.var_name) !active) in
-        active := List.sort (fun a b -> compare a.finish b.finish) updated_active
-      else
-        (* Spill the current interval as it ends later than any active one *)
+      if !active = [] then begin
+        (* Fallback for safety, though this state should not be reached in correct execution *)
         spill_offset := !spill_offset + 4;
         Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset)
+      end else
+        let spill_candidate = List.hd (List.rev !active) in
+        if spill_candidate.finish > current_interval.finish then
+          let reg_to_free =
+            match Hashtbl.find allocation_map spill_candidate.var_name with
+            | PhysicalRegister r -> r
+            | StackSlot _ -> failwith "Logic error: Active interval chosen for spilling must have a physical register"
+          in
+          spill_offset := !spill_offset + 4;
+          Hashtbl.replace allocation_map spill_candidate.var_name (StackSlot !spill_offset);
+          Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg_to_free);
+          let updated_active = current_interval :: (List.filter (fun i -> i.var_name <> spill_candidate.var_name) !active) in
+          active := List.sort (fun a b -> compare a.finish b.finish) updated_active
+        else
+          spill_offset := !spill_offset + 4;
+          Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset)
     end
   ) sorted_intervals;
 
-  (allocation_map, !spill_offset * 4)
-
+  (allocation_map, !spill_offset * 4)/

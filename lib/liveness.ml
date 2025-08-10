@@ -61,6 +61,8 @@ let def_use (inst : ir_inst) : VSet.t * VSet.t =
 *)
 let analyze (func: ir_func_o) : (VSet.t LabelMap.t * VSet.t LabelMap.t) =
   let blocks = func.blocks in
+  
+  
   let live_in = ref LabelMap.empty in
   let live_out = ref LabelMap.empty in
 
@@ -76,8 +78,7 @@ let analyze (func: ir_func_o) : (VSet.t LabelMap.t * VSet.t LabelMap.t) =
     List.iter (fun b ->
       (* live_out[b] = union of live_in[s] for all successors s of b *)
       let succ_live_ins = List.map (fun succ_label ->
-          try LabelMap.find succ_label !live_in
-          with Not_found -> VSet.empty (* Should not happen in a well-formed CFG *)
+          LabelMap.find succ_label !live_in
         ) b.succs
       in
       let new_out = List.fold_left VSet.union VSet.empty succ_live_ins in
@@ -88,10 +89,10 @@ let analyze (func: ir_func_o) : (VSet.t LabelMap.t * VSet.t LabelMap.t) =
         changed := true;
       end;
 
-      (* Calculate use and def for the entire block *)
-      let block_use, block_def = List.fold_left (fun (u_acc, d_acc) inst ->
+      (* live_in[b] = use[b] U (live_out[b] - def[b]) *)
+      let block_def, block_use = List.fold_left (fun (d_acc, u_acc) inst ->
           let d, u = def_use inst in
-          (VSet.union u (VSet.diff u_acc d), VSet.union d d_acc)
+          (VSet.union d d_acc, VSet.union u u_acc)
         ) (VSet.empty, VSet.empty) b.insts
       in
       
