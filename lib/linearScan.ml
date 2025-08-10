@@ -34,7 +34,7 @@ let build_intervals (func: ir_func_o) : interval list =
 
   (* 添加变量在终结符中的使用 *)
   let process_terminator block pos =
-    let _, term_use = match block.terminator with  (* 使用_ 替代 term_def，表示我们不使用这个值 *)
+    let _, term_use = match block.terminator with
       | TermIf (cond, _, _) -> 
           let names = match get_name cond with
             | Some n -> VSet.singleton n
@@ -55,7 +55,6 @@ let build_intervals (func: ir_func_o) : interval list =
   (* 处理所有基本块 *)
   let process_blocks () =
     List.iter (fun block ->
-      (* 移除未使用的变量，使用 _ 表示我们不需要这个值 *)
       let _ = LabelMap.find_opt block.label live_out in
       
       (* 处理块中的每条指令及其活跃变量 *)
@@ -63,10 +62,8 @@ let build_intervals (func: ir_func_o) : interval list =
         let pos = !inst_num + i in
         let def, use = Liveness.def_use inst in
         
-        (* 记录每个变量在此指令的使用 *)
+        (* 记录每个变量在此指令的使用和定义 *)
         VSet.iter (fun v -> add_usage v pos) use;
-        
-        (* 记录每个定义的变量 *)
         VSet.iter (fun v -> add_usage v pos) def;
       ) block.insts;
       
@@ -120,6 +117,23 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
   let free_registers = ref available_registers in
   let spill_offset = ref 0 in
 
+  (* 为函数参数预先分配寄存器 *)
+  let pre_allocate_args args =
+    List.iteri (fun i arg ->
+      if i < 8 && List.length !free_registers > 0 then
+        (* 把前8个参数分配到寄存器 *)
+        let reg = List.hd !free_registers in
+        free_registers := List.tl !free_registers;
+        Hashtbl.add allocation_map arg (PhysicalRegister reg)
+      else
+        (* 其余参数溢出到栈上 *)
+        begin
+          spill_offset := !spill_offset + 4;
+          Hashtbl.add allocation_map arg (StackSlot !spill_offset)
+        end
+    ) args
+  in
+
   (* 遍历每个活跃区间进行分配 *)
   List.iter (fun current_interval ->
     (* 1. 过期旧区间并回收寄存器 *)
@@ -150,10 +164,43 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
       Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
       active := current_interval :: !active;
     end else begin
-      (* 没有空闲寄存器，必须溢出 *)
-      (* 我们采用一个简单的策略：总是溢出当前区间 *)
-      spill_offset := !spill_offset + 4;
-      Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset);
+      (* 没有空闲寄存器，采用改进的溢出策略 *)
+      let spillable_active = List.filter (fun interval ->
+        interval.finish > current_interval.finish
+      ) !active in
+      
+      if spillable_active <> [] then begin
+        (* 找到生命周期最长的变量并溢出它 *)
+        let to_spill = List.hd (List.sort (fun a b -> 
+          compare b.finish a.finish
+        ) spillable_active) in
+        
+        (* 从活跃列表中移除该变量 *)
+        active := List.filter (fun i -> i.var_name <> to_spill.var_name) !active;
+        
+        (* 回收它的寄存器 *)
+        match Hashtbl.find_opt allocation_map to_spill.var_name with
+        | Some (PhysicalRegister reg) ->
+            free_registers := reg :: !free_registers;
+            
+            (* 将该变量溢出到栈 *)
+            spill_offset := !spill_offset + 4;
+            Hashtbl.replace allocation_map to_spill.var_name (StackSlot !spill_offset);
+            
+            (* 为当前变量分配回收的寄存器 *)
+            let reg = List.hd !free_registers in
+            free_registers := List.tl !free_registers;
+            Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
+            active := current_interval :: !active;
+        | _ -> 
+            (* 如果找不到物理寄存器，则溢出当前变量 *)
+            spill_offset := !spill_offset + 4;
+            Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset);
+      end else begin
+        (* 没有可溢出的变量，溢出当前变量 *)
+        spill_offset := !spill_offset + 4;
+        Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset);
+      end
     end;
     
     (* 确保active列表始终按照结束时间排序 *)
