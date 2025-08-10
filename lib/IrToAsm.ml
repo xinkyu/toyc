@@ -126,7 +126,7 @@ let com_block_o (blk : ir_block) allocation_map spill_base_offset : string =
 
 let com_func_o (f : ir_func_o) : string =
   let _, live_out = Liveness.analyze f in
-  let intervals = LinearScan.build_intervals f live_out in
+  let intervals = LinearScan.build_intervals f in
   let allocation_map, num_spills = LinearScan.allocate intervals in
   let caller_save_area = List.length available_registers * 4 in
   let spill_area = num_spills in
