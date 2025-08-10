@@ -1,113 +1,97 @@
-(* cse.ml - Common Subexpression Elimination *)
+(* file: lib/cse.ml *)
+
 open Ir
 
-(* 用于CSE的表达式签名 *)
-type expr_signature =
-  | BinopSig of string * operand * operand  (* op, lhs, rhs *)
-  | UnopSig of string * operand             (* op, src *)
+(* --- 新增：添加缺失的 string_of_operand 辅助函数 --- *)
+let string_of_operand = function
+  | Reg name -> name
+  | Imm i -> string_of_int i
+  | Var name -> name
 
-(* 创建表达式签名 *)
-let make_signature = function
-  | Binop (op, _, lhs, rhs) -> Some (BinopSig (op, lhs, rhs))
+(* CSE表达式的“签名”，用于唯一标识一个计算 *)
+type expr_signature =
+  | BinopSig of string * operand * operand
+  | UnopSig of string * operand
+
+(* 创建表达式签名，但做规范化处理：(a+b) 和 (b+a) 应有相同签名 *)
+let make_signature inst =
+  match inst with
+  | Binop (op, _, lhs, rhs) ->
+      (* 对于可交换的运算符，将操作数排序以保证唯一性 *)
+      if op = "+" || op = "*" || op = "==" || op = "!=" then
+        if string_of_operand lhs > string_of_operand rhs then
+          Some (BinopSig (op, rhs, lhs))
+        else
+          Some (BinopSig (op, lhs, rhs))
+      else
+        Some (BinopSig (op, lhs, rhs))
   | Unop (op, _, src) -> Some (UnopSig (op, src))
   | _ -> None
 
-(* 表达式赋值记录 *)
-type expr_entry = {
-  result: operand;
-  orig_expr: ir_inst;
-}
+(* 获取指令定义的目标寄存器名 *)
+let get_dst_name = function
+  | Binop (_, dst, _, _) | Unop (_, dst, _) | Assign (dst, _)
+  | Call (dst, _, _) | Load (dst, _) ->
+      (match dst with
+      | Reg r | Var r -> Some r
+      | _ -> None)
+  | _ -> None
 
-(* 检查表达式是否可能被修改 *)
-let invalidates expr inst =
-  let invalidated_by_write dst =
-    match expr, dst with
-    | BinopSig(_, Reg r1, _), Reg r2 
-    | BinopSig(_, _, Reg r1), Reg r2
-    | BinopSig(_, Var r1, _), Var r2
-    | BinopSig(_, _, Var r1), Var r2
-    | UnopSig(_, Reg r1), Reg r2
-    | UnopSig(_, Var r1), Var r2 -> r1 = r2
-    | _ -> false
-  in
-  match inst with
-  | Binop(_, dst, _, _)
-  | Unop(_, dst, _)
-  | Assign(dst, _)
-  | Call(dst, _, _)
-  | Load(dst, _) -> invalidated_by_write dst
-  | Store(_, _) -> true  (* 保守处理，任何内存写操作都可能影响其他值 *)
-  | _ -> false
+(* 核心：对单个基本块应用安全的局部CSE *)
+let apply_cse_to_block (block: ir_block) : ir_block =
+  (* Hashtbl: expr_signature -> operand (存储了该表达式结果的临时变量) *)
+  let available_exprs = Hashtbl.create 50 in
+  let new_insts = ref [] in
 
-(* 检查操作数是否是临时寄存器 *)
-let is_temp = function
-  | Reg r -> String.length r > 0 && r.[0] = 't'
-  | _ -> false
+  List.iter (fun inst ->
+    let signature = make_signature inst in
+    let is_eliminated = ref false in
 
-(* 更高效的CSE实现 *)
-let apply_cse (block : ir_block) : ir_block =
-  (* 表达式 -> 结果寄存器 映射 *)
-  let expr_table = Hashtbl.create 50 in
-  
-  (* 处理单个指令 *)
-  let rec process_insts acc insts =
-    match insts with
-    | [] -> List.rev acc
-    
-    | (Binop(op, dst, lhs, rhs) as expr) :: rest ->
-        let sig_opt = Some (BinopSig(op, lhs, rhs)) in
-        (match sig_opt with
-        | Some signature ->
-            (match Hashtbl.find_opt expr_table signature with
-            | Some entry ->
-                (* 找到了相同的表达式，用已有结果替代 *)
-                let new_inst = Assign(dst, entry.result) in
-                process_insts (new_inst :: acc) rest
-            | None ->
-                (* 记录新表达式 *)
-                Hashtbl.add expr_table signature {result = dst; orig_expr = expr};
-                process_insts (expr :: acc) rest)
-        | None -> process_insts (expr :: acc) rest)
-    
-    | (Unop(op, dst, src) as expr) :: rest ->
-        let sig_opt = Some (UnopSig(op, src)) in
-        (match sig_opt with
-        | Some signature ->
-            (match Hashtbl.find_opt expr_table signature with
-            | Some entry ->
-                (* 找到了相同的表达式，用已有结果替代 *)
-                let new_inst = Assign(dst, entry.result) in
-                process_insts (new_inst :: acc) rest
-            | None ->
-                (* 记录新表达式 *)
-                Hashtbl.add expr_table signature {result = dst; orig_expr = expr};
-                process_insts (expr :: acc) rest)
-        | None -> process_insts (expr :: acc) rest)
-    
-    | (Call _ | Store _) :: rest ->
-        (* 对于有副作用的指令，清空表达式表 *)
-        Hashtbl.clear expr_table;
-        process_insts (List.hd insts :: acc) rest
+    (* 1. 检查当前指令是否可以被已有的公共子表达式替换 *)
+    (match signature with
+    | Some sig_val ->
+        (match Hashtbl.find_opt available_exprs sig_val with
+        | Some saved_operand ->
+            (* 找到了！用一个Assign指令替换当前指令 *)
+            (match get_dst_name inst with
+            | Some dst_name ->
+                new_insts := Assign (Var dst_name, saved_operand) :: !new_insts;
+                is_eliminated := true
+            | None -> ());
+        | None -> ())
+    | None -> ());
+
+    if not !is_eliminated then
+      begin
+        (* 2. 如果指令没有被替换，那么它就是一个新的“定义” *)
+        (* 首先，这个新定义可能会使之前的一些可用表达式失效 *)
+        (match get_dst_name inst with
+        | Some dst_name ->
+            Hashtbl.iter (fun sig_val _ ->
+              match sig_val with
+              | BinopSig (_, op1, op2) ->
+                  if string_of_operand op1 = dst_name || string_of_operand op2 = dst_name then
+                    Hashtbl.remove available_exprs sig_val
+              | UnopSig (_, op1) ->
+                  if string_of_operand op1 = dst_name then
+                    Hashtbl.remove available_exprs sig_val
+            ) available_exprs
+        | None -> ());
+
+        (* 其次，将当前指令加入可用表达式池 *)
+        (match signature with
+        | Some sig_val ->
+            (match get_dst_name inst with
+            | Some dst_name -> Hashtbl.add available_exprs sig_val (Var dst_name)
+            | None -> ())
+        | None -> ());
         
-    | inst :: rest ->
-        (* 检查指令是否使表达式表中的任何条目失效 *)
-        Hashtbl.filter_map_inplace (fun key entry ->
-            if invalidates key inst then None else Some entry
-        ) expr_table;
-        process_insts (inst :: acc) rest
-  in
-  
-  (* 处理所有指令 *)
-  let new_insts = process_insts [] block.insts in
-  { block with insts = new_insts }
+        new_insts := inst :: !new_insts
+      end
+  ) block.insts;
 
-(* 对所有基本块应用CSE，并多次应用以捕获更多优化机会 *)
-let common_subexpr_elimination (blocks : ir_block list) : ir_block list =
-  (* 多次应用CSE以获得更好的结果 *)
-  let rec optimize_blocks blocks iterations =
-    if iterations = 0 then blocks
-    else
-      let optimized = List.map apply_cse blocks in
-      optimize_blocks optimized (iterations - 1)
-  in
-  optimize_blocks blocks 2  (* 应用两轮CSE *)
+  { block with insts = List.rev !new_insts }
+
+(* 对程序中所有函数的所有基本块应用CSE *)
+let common_subexpr_elimination (blocks: ir_block list) : ir_block list =
+  List.map apply_cse_to_block blocks
