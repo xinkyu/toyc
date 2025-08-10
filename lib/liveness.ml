@@ -54,6 +54,16 @@ let def_use (inst : ir_inst) : VSet.t * VSet.t =
   | Ret None -> (VSet.empty, VSet.empty)
   | Goto _ | Label _ -> (VSet.empty, VSet.empty)
 
+(* 也为终结符计算def/use *)
+let term_def_use term =
+  match term with
+  | TermIf (cond, _, _) ->
+      (VSet.empty, names_from_operands [cond])
+  | TermRet (Some op) ->
+      (VSet.empty, names_from_operands [op])
+  | TermRet None | TermGoto _ | TermSeq _ ->
+      (VSet.empty, VSet.empty)
+
 (*
   The main liveness analysis function.
   It performs a backward dataflow analysis on the CFG.
@@ -61,7 +71,6 @@ let def_use (inst : ir_inst) : VSet.t * VSet.t =
 *)
 let analyze (func: ir_func_o) : (VSet.t LabelMap.t * VSet.t LabelMap.t) =
   let blocks = func.blocks in
-  
   
   let live_in = ref LabelMap.empty in
   let live_out = ref LabelMap.empty in
@@ -77,32 +86,37 @@ let analyze (func: ir_func_o) : (VSet.t LabelMap.t * VSet.t LabelMap.t) =
     changed := false;
     List.iter (fun b ->
       (* live_out[b] = union of live_in[s] for all successors s of b *)
-      let succ_live_ins = List.map (fun succ_label ->
-          LabelMap.find succ_label !live_in
-        ) b.succs
+      let succ_live_ins = List.fold_left (fun acc succ_label ->
+          try VSet.union acc (LabelMap.find succ_label !live_in)
+          with Not_found -> acc (* 处理可能不存在的后继块 *)
+        ) VSet.empty b.succs
       in
-      let new_out = List.fold_left VSet.union VSet.empty succ_live_ins in
       
       let old_out = LabelMap.find b.label !live_out in
-      if not (VSet.equal new_out old_out) then begin
-        live_out := LabelMap.add b.label new_out !live_out;
+      if not (VSet.equal succ_live_ins old_out) then begin
+        live_out := LabelMap.add b.label succ_live_ins !live_out;
         changed := true;
       end;
 
-      (* live_in[b] = use[b] U (live_out[b] - def[b]) *)
-      let block_def, block_use = List.fold_left (fun (d_acc, u_acc) inst ->
-          let d, u = def_use inst in
-          (VSet.union d d_acc, VSet.union u u_acc)
-        ) (VSet.empty, VSet.empty) b.insts
+      (* 计算块的全部指令的def/use，包括终结符 *)
+      let block_def, block_use = 
+        let def_from_insts, use_from_insts = List.fold_left (fun (d_acc, u_acc) inst ->
+            let d, u = def_use inst in
+            (VSet.union d d_acc, VSet.union u (VSet.diff u_acc d))
+          ) (VSet.empty, VSet.empty) b.insts
+        in
+        let term_def, term_use = term_def_use b.terminator in
+        (VSet.union def_from_insts term_def, VSet.union use_from_insts term_use)
       in
       
-      let new_in = VSet.union block_use (VSet.diff new_out block_def) in
+      (* live_in[b] = use[b] U (live_out[b] - def[b]) *)
+      let new_in = VSet.union block_use (VSet.diff (LabelMap.find b.label !live_out) block_def) in
       let old_in = LabelMap.find b.label !live_in in
       if not (VSet.equal new_in old_in) then begin
         live_in := LabelMap.add b.label new_in !live_in;
         changed := true;
       end
-    ) (List.rev blocks) (* Iterate backwards for faster convergence *)
+    ) (List.rev blocks) (* 反向迭代以加速收敛 *)
   done;
 
   (!live_in, !live_out)

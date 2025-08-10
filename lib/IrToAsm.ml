@@ -61,14 +61,14 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
         | "*" -> Printf.sprintf "\tmul t5, %s, %s\n" reg1 reg2
         | "/" -> Printf.sprintf "\tdiv t5, %s, %s\n" reg1 reg2
         | "%" -> Printf.sprintf "\trem t5, %s, %s\n" reg1 reg2
-        | "==" -> Printf.sprintf "\tsub t5, %s, %s\n\tseqz t5, t5\n" reg1 reg2
-        | "!=" -> Printf.sprintf "\tsub t5, %s, %s\n\tsnez t5, t5\n" reg1 reg2
-        | "<=" -> Printf.sprintf "\tsgt t5, %s, %s\n\txori t5, t5, 1\n" reg1 reg2
+        | "==" -> Printf.sprintf "\txor t5, %s, %s\n\tseqz t5, t5\n" reg1 reg2
+        | "!=" -> Printf.sprintf "\txor t5, %s, %s\n\tsnez t5, t5\n" reg1 reg2
+        | "<=" -> Printf.sprintf "\tslt t5, %s, %s\n\txori t5, t5, 1\n" reg2 reg1
         | ">=" -> Printf.sprintf "\tslt t5, %s, %s\n\txori t5, t5, 1\n" reg1 reg2
         | "<" -> Printf.sprintf "\tslt t5, %s, %s\n" reg1 reg2
-        | ">" -> Printf.sprintf "\tsgt t5, %s, %s\n" reg1 reg2
-        | "&&" -> Printf.sprintf "\tand t5, %s, %s\n" reg1 reg2
-        | "||" -> Printf.sprintf "\tor t5, %s, %s\n" reg1 reg2
+        | ">" -> Printf.sprintf "\tslt t5, %s, %s\n" reg2 reg1
+        | "&&" -> Printf.sprintf "\tsnez t0, %s\n\tsnez t1, %s\n\tand t5, t0, t1\n" reg1 reg2
+        | "||" -> Printf.sprintf "\tor t5, %s, %s\n\tsnez t5, t5\n" reg1 reg2
         | _ -> failwith ("Unknown binop: " ^ op)
       in
       let store_code = store_operand allocation_map spill_base_offset "t5" dst in
@@ -90,111 +90,155 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
       let store_code = store_operand allocation_map spill_base_offset reg1 dst in
       code1 ^ store_code
   | Call (dst, fname, args) ->
-      (* 1. Identify which physical registers are currently active and need saving *)
+      (* 1. 确定当前活跃的物理寄存器，这些需要在调用前保存 *)
       let active_phys_regs =
         Hashtbl.fold (fun _ alloc acc ->
           match alloc with
-          | PhysicalRegister r -> if List.mem r available_registers then r :: acc else acc
+          | PhysicalRegister r -> 
+              if List.mem r available_registers then r :: acc else acc
           | StackSlot _ -> acc
         ) allocation_map []
         |> List.sort_uniq compare
       in
       
-      (* 2. Save these active registers to the caller-save area *)
+      (* 2. 保存这些活跃寄存器到caller-save区域 *)
       let save_callers =
-        List.mapi (fun i r -> Printf.sprintf "\tsw %s, %d(sp)\n" r (caller_save_base + i*4))
+        List.mapi (fun i r -> 
+          Printf.sprintf "\tsw %s, %d(sp)\n" r (caller_save_base + i*4))
         active_phys_regs
         |> String.concat ""
       in
 
-      (* 3. Set up arguments for the call *)
+      (* 3. 为函数调用设置参数 *)
       let args_code =
         List.mapi (fun i arg ->
           if i < 8 then
             load_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) arg
-          else
+          else begin
+            (* 超过8个参数的情况，需要通过栈传递 *)
             let arg_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" arg in
+            (* 修正: 正确计算栈参数的偏移量 *)
             arg_code ^ Printf.sprintf "\tsw %s, %d(sp)\n" reg ((i-8)*4)
+          end
         ) args
         |> String.concat ""
       in
 
-      (* 4. Restore the active registers after the call returns *)
+      (* 4. 调用后恢复活跃寄存器 *)
       let restore_callers =
-        List.mapi (fun i r -> Printf.sprintf "\tlw %s, %d(sp)\n" r (caller_save_base + i*4))
+        List.mapi (fun i r -> 
+          Printf.sprintf "\tlw %s, %d(sp)\n" r (caller_save_base + i*4))
         active_phys_regs
         |> String.concat ""
       in
 
-      (* 5. Store the result from a0 into its final destination *)
+      (* 5. 从a0存储结果到最终目的地 *)
       let store_result = store_operand allocation_map spill_base_offset "a0" dst in
 
-      save_callers ^ args_code ^ Printf.sprintf "\tcall %s\n" fname ^ restore_callers ^ store_result
+      save_callers ^ args_code ^ 
+      Printf.sprintf "\tcall %s\n" fname ^ 
+      restore_callers ^ store_result
+  
   | Ret (Some op) ->
       let load_code = load_operand allocation_map spill_base_offset "a0" op in
       load_code ^ Printf.sprintf "\tj %s\n" epilogue_label
-  | Ret None -> Printf.sprintf "\tj %s\n" epilogue_label
-  | Goto label -> Printf.sprintf "\tj %s\n" label
+  | Ret None -> 
+      Printf.sprintf "\tj %s\n" epilogue_label
+  | Goto label -> 
+      Printf.sprintf "\tj %s\n" label
   | IfGoto (cond, label) ->
       let cond_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" cond in
-      cond_code ^ Printf.sprintf "\tbne %s, x0, %s\n" reg label
-  | Label label -> Printf.sprintf "%s:\n" label
-  | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
+      cond_code ^ Printf.sprintf "\tbnez %s, %s\n" reg label
+  | Label label -> 
+      Printf.sprintf "%s:\n" label
+  | Load _ | Store _ -> 
+      failwith "Load/Store IR instructions not supported"
 
 let com_block_o (blk : ir_block) allocation_map spill_base_offset caller_save_base epilogue_label : string =
-  blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat ""
+  (* 生成基本块标签 *)
+  let label_code = Printf.sprintf "%s:\n" blk.label in
+  
+  (* 生成指令代码 *)
+  let insts_code = blk.insts 
+    |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) 
+    |> String.concat "" 
+  in
+  
+  (* 生成终结符代码 *)
+  let term_code = match blk.terminator with
+    | TermGoto label -> Printf.sprintf "\tj %s\n" label
+    | TermSeq label -> Printf.sprintf "\tj %s\n" label
+    | TermIf (cond, then_label, else_label) ->
+        let cond_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" cond in
+        cond_code ^ Printf.sprintf "\tbnez %s, %s\n\tj %s\n" reg then_label else_label
+    | TermRet (Some op) ->
+        let load_code = load_operand allocation_map spill_base_offset "a0" op in
+        load_code ^ Printf.sprintf "\tj %s\n" epilogue_label
+    | TermRet None ->
+        Printf.sprintf "\tj %s\n" epilogue_label
+  in
+  
+  label_code ^ insts_code ^ term_code
 
 let com_func_o (f : ir_func_o) : string =
+  (* 构建活跃区间并分配寄存器 *)
   let intervals = LinearScan.build_intervals f in
-  let allocation_map, num_spills = LinearScan.allocate intervals in
+  let allocation_map, spill_size = LinearScan.allocate intervals in
 
-  (* Pre-scan for max outgoing stack arguments to reserve space *)
+  (* 扫描计算最大的外部栈参数 *)
   let max_outgoing_stack_args = List.fold_left (fun current_max block ->
     List.fold_left (fun m inst ->
       match inst with
-      | Call (_, _, args) -> max m (List.length args - 8)
+      | Call (_, _, args) -> max m (max 0 (List.length args - 8))
       | _ -> m
     ) current_max block.insts
   ) 0 f.blocks
   in
 
-  let outgoing_args_area = max 0 max_outgoing_stack_args * 4 in
+  (* 计算栈帧大小 *)
+  let outgoing_args_area = max_outgoing_stack_args * 4 in
   let caller_save_area = List.length available_registers * 4 in
-  let spill_area = num_spills in
+  let spill_area = spill_size in
   let ra_area = 4 in
   let stack_size = align_stack (outgoing_args_area + caller_save_area + spill_area + ra_area) in
   
-  (* Define base offsets for different areas relative to SP *)
-  let _outgoing_args_base = 0 in
+  (* 定义相对于SP的不同区域的基址偏移 *)
+  let outgoing_args_base = 0 in
   let caller_save_base = outgoing_args_area in
   let ra_base = outgoing_args_area + caller_save_area in
   let spill_base_offset = outgoing_args_area + caller_save_area + ra_area in
 
+  (* 生成函数序言 *)
   let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -%d\n\tsw ra, %d(sp)\n"
     f.name stack_size ra_base
   in
+  
+  (* 生成参数代码 - 从a寄存器保存参数到它们被分配的位置 *)
   let args_code =
     List.mapi (fun i arg_name ->
       if i < 8 then
-        (* Argument is in a register, store it to its assigned location (reg or spill slot) *)
+        (* 参数在寄存器中，保存到其分配的位置(寄存器或溢出槽) *)
         store_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) (Var arg_name)
       else
-        (* Argument is on the stack. Load it into a temp reg, then store it. *)
-        let arg_offset_on_stack = stack_size + ((i - 8) * 4) in
-        let load_code = Printf.sprintf "\tlw t5, %d(sp)\n" arg_offset_on_stack in
+        (* 参数在栈上。加载到临时寄存器，然后保存。 *)
+        let arg_offset_on_caller_stack = stack_size + ((i - 8) * 4) in
+        let load_code = Printf.sprintf "\tlw t5, %d(sp)\n" arg_offset_on_caller_stack in
         load_code ^ (store_operand allocation_map spill_base_offset "t5" (Var arg_name))
     ) f.args
     |> String.concat ""
   in
+  
+  (* 函数尾声标签 *)
   let epilogue_label = f.name ^ "_epilogue" in
 
+  (* 生成函数尾声 *)
   let epilogue =
     Printf.sprintf "%s:\n\tlw ra, %d(sp)\n\taddi sp, sp, %d\n\tret\n"
       epilogue_label ra_base stack_size
   in
 
+  (* 生成函数体代码 *)
   let body_code = f.blocks
-    (* Pass the epilogue label down to the instruction compiler *)
     |> List.map (fun blk -> com_block_o blk allocation_map spill_base_offset caller_save_base epilogue_label)
     |> String.concat ""
   in
@@ -280,7 +324,7 @@ let com_func_non_opt (f : ir_func) : string =
     | Goto label -> Printf.sprintf "\tj %s\n" label
     | IfGoto (cond, label) ->
         let cond_code = l_operand "t0" cond in
-        cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
+        cond_code ^ Printf.sprintf "\tbnez t0, %s\n" label
     | Label label -> Printf.sprintf "%s:\n" label
     | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
   in
