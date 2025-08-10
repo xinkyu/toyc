@@ -65,19 +65,23 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
   let spill_offset = ref 0 in
 
   List.iter (fun current_interval ->
-    (* 1. Expire old intervals in active list *)
+    (* 1. Expire old intervals and remove any spilled intervals from active list *)
     let new_active = ref [] in
     List.iter (fun (active_interval:interval) ->
-      if active_interval.finish >= current_interval.start then
-        (* This interval is still active, keep it *)
-        new_active := active_interval :: !new_active
-      else
-        (* This interval has expired, free its register *)
-        match Hashtbl.find allocation_map active_interval.var_name with
-        | PhysicalRegister reg -> free_registers := reg :: !free_registers
-        | StackSlot _ -> () (* Should not happen for active intervals *)
+      match Hashtbl.find allocation_map active_interval.var_name with
+      | PhysicalRegister reg ->
+          if active_interval.finish >= current_interval.start then
+            (* This interval is still active, keep it *)
+            new_active := active_interval :: !new_active
+          else
+            (* This interval has expired, free its register *)
+            free_registers := reg :: !free_registers
+      | StackSlot _ ->
+          (* This was spilled previously. It should not be in the active list.
+             We remove it by not adding it to new_active. *)
+          ()
     ) !active;
-    active := List.rev !new_active; (* Keep it sorted by finish point *)
+    active := List.sort (fun a b -> compare a.finish b.finish) !new_active;
 
     (* 2. Try to allocate a register *)
     if (List.length !free_registers) > 0 then begin
@@ -89,30 +93,11 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
       active := List.sort (fun a b -> compare a.finish b.finish) (current_interval :: !active);
     end else begin
       (* No free registers, must spill *)
-      let last_active = List.hd (List.rev !active) in (* The one that finishes last *)
-      
-      if last_active.finish > current_interval.finish then
-        (* Spill the existing active interval (last_active) *)
-        let reg = match Hashtbl.find allocation_map last_active.var_name with
-          | PhysicalRegister r -> r
-          | StackSlot _ -> failwith "Spill candidate has no register"
-        in
-        
-        (* Give the register to the current interval *)
-        Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
-        
-        (* Mark the spilled interval as being on the stack *)
-        spill_offset := !spill_offset + 4;
-        Hashtbl.replace allocation_map last_active.var_name (StackSlot !spill_offset);
-
-        (* Update active list: remove spilled, add current *)
-        let without_spilled = List.filter (fun i -> i.var_name <> last_active.var_name) !active in
-        active := List.sort (fun a b -> compare a.finish b.finish) (current_interval :: without_spilled);
-
-      else
-        (* Spill the current interval *)
-        spill_offset := !spill_offset + 4;
-        Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset);
+      (* No free registers, must spill. To avoid the complex (and currently buggy)
+         logic of spilling an *active* interval and moving its value to the stack,
+         we will always spill the *current* interval. This is less optimal but guarantees correctness. *)
+      spill_offset := !spill_offset + 4;
+      Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset)
     end
 
   ) sorted_intervals;

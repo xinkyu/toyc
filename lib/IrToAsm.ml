@@ -49,7 +49,7 @@ let store_operand allocation_map spill_base_offset source_reg dst =
           Printf.sprintf "\tsw %s, %d(sp)\n" source_reg (spill_base_offset + offset)
       | None -> ""
 
-let com_inst_o (inst : ir_inst) allocation_map spill_base_offset : string =
+let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_base epilogue_label : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" lhs in
@@ -90,29 +90,41 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset : string =
       let store_code = store_operand allocation_map spill_base_offset reg1 dst in
       code1 ^ store_code
   | Call (dst, fname, args) ->
-      let caller_save_area = List.length available_registers * 4 in
+      (* 1. Save caller-saved registers to the designated area in our frame *)
       let save_callers =
-        List.mapi (fun i r -> Printf.sprintf "\tsw %s, %d(sp)\n" r (i*4)) available_registers
+        List.mapi (fun i r -> Printf.sprintf "\tsw %s, %d(sp)\n" r (caller_save_base + i*4))
+        available_registers
         |> String.concat ""
       in
+
+      (* 2. Set up arguments for the call *)
       let args_code =
         List.mapi (fun i arg ->
           if i < 8 then
             load_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) arg
           else
+            (* Place stack arguments in the outgoing area at the top of our frame *)
             let arg_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" arg in
-            arg_code ^ Printf.sprintf "\tsw %s, %d(sp)\n" reg (caller_save_area + (i-8)*4)
+            arg_code ^ Printf.sprintf "\tsw %s, %d(sp)\n" reg ((i-8)*4)
         ) args
         |> String.concat ""
       in
+
+      (* 3. Restore caller-saved registers after the call returns *)
       let restore_callers =
-        List.mapi (fun i r -> Printf.sprintf "\tlw %s, %d(sp)\n" r (i*4)) available_registers
+        List.mapi (fun i r -> Printf.sprintf "\tlw %s, %d(sp)\n" r (caller_save_base + i*4))
+        available_registers
         |> String.concat ""
       in
+
+      (* 4. Store the result from a0 into its final destination *)
       let store_result = store_operand allocation_map spill_base_offset "a0" dst in
+
       save_callers ^ args_code ^ Printf.sprintf "\tcall %s\n" fname ^ restore_callers ^ store_result
-  | Ret (Some op) -> load_operand allocation_map spill_base_offset "a0" op
-  | Ret None -> ""
+  | Ret (Some op) ->
+      let load_code = load_operand allocation_map spill_base_offset "a0" op in
+      load_code ^ Printf.sprintf "\tj %s\n" epilogue_label
+  | Ret None -> Printf.sprintf "\tj %s\n" epilogue_label
   | Goto label -> Printf.sprintf "\tj %s\n" label
   | IfGoto (cond, label) ->
       let cond_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" cond in
@@ -120,39 +132,65 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset : string =
   | Label label -> Printf.sprintf "%s:\n" label
   | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
 
-let com_block_o (blk : ir_block) allocation_map spill_base_offset : string =
-  blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset) |> String.concat ""
+let com_block_o (blk : ir_block) allocation_map spill_base_offset caller_save_base epilogue_label : string =
+  blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat ""
 
 let com_func_o (f : ir_func_o) : string =
   let intervals = LinearScan.build_intervals f in
   let allocation_map, num_spills = LinearScan.allocate intervals in
+
+  (* Pre-scan for max outgoing stack arguments to reserve space *)
+  let max_outgoing_stack_args = List.fold_left (fun current_max block ->
+    List.fold_left (fun m inst ->
+      match inst with
+      | Call (_, _, args) -> max m (List.length args - 8)
+      | _ -> m
+    ) current_max block.insts
+  ) 0 f.blocks
+  in
+
+  let outgoing_args_area = max 0 max_outgoing_stack_args * 4 in
   let caller_save_area = List.length available_registers * 4 in
   let spill_area = num_spills in
   let ra_area = 4 in
-  let stack_size = align_stack (caller_save_area + spill_area + ra_area) in
-  let spill_base_offset = caller_save_area + ra_area in
+  let stack_size = align_stack (outgoing_args_area + caller_save_area + spill_area + ra_area) in
+  
+  (* Define base offsets for different areas relative to SP *)
+  let outgoing_args_base = 0 in
+  let caller_save_base = outgoing_args_area in
+  let ra_base = outgoing_args_area + caller_save_area in
+  let spill_base_offset = outgoing_args_area + caller_save_area + ra_area in
+
   let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -%d\n\tsw ra, %d(sp)\n"
-    f.name stack_size caller_save_area
+    f.name stack_size ra_base
   in
   let args_code =
     List.mapi (fun i arg_name ->
       if i < 8 then
+        (* Argument is in a register, store it to its assigned location (reg or spill slot) *)
         store_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) (Var arg_name)
       else
-        failwith "Stack arguments not yet implemented in optimized compiler"
+        (* Argument is on the stack. Load it into a temp reg, then store it. *)
+        let arg_offset_on_stack = stack_size + ((i - 8) * 4) in
+        let load_code = Printf.sprintf "\tlw t5, %d(sp)\n" arg_offset_on_stack in
+        load_code ^ (store_operand allocation_map spill_base_offset "t5" (Var arg_name))
     ) f.args
     |> String.concat ""
   in
+  let epilogue_label = f.name ^ "_epilogue" in
+
+  let epilogue =
+    Printf.sprintf "%s:\n\tlw ra, %d(sp)\n\taddi sp, sp, %d\n\tret\n"
+      epilogue_label ra_base stack_size
+  in
+
   let body_code = f.blocks
-    |> List.map (fun blk -> com_block_o blk allocation_map spill_base_offset)
+    (* Pass the epilogue label down to the instruction compiler *)
+    |> List.map (fun blk -> com_block_o blk allocation_map spill_base_offset caller_save_base epilogue_label)
     |> String.concat ""
   in
-  let epilogue =
-    Printf.sprintf "\tlw ra, %d(sp)\n\taddi sp, sp, %d\n\tret\n"
-      caller_save_area stack_size
-  in
-  let final_body = if String.ends_with ~suffix:"\tret\n" body_code then body_code else body_code ^ epilogue in
-  prologue ^ args_code ^ final_body
+
+  prologue ^ args_code ^ body_code ^ epilogue
 
 (*******************************************************************)
 (* Original Non-Optimized Code Generation (Spill-Everything) *)
