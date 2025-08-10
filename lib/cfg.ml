@@ -205,8 +205,7 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
   blocks
 
 (* p04_common_subexpr: 公共子表达式消除 *)
-(* 暂时禁用CSE以解决寄存器问题 *)
-let p04_common_subexpr = fun blocks -> blocks
+let p04_common_subexpr = Cse.common_subexpr_elimination
 
 let optimize blocks =
-  blocks |> build_cfg |> constant_propagation
+  blocks |> build_cfg |> constant_propagation |> p04_common_subexpr
