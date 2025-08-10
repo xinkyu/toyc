@@ -37,7 +37,6 @@ let invalidates expr inst =
   | Call(dst, _, _)
   | Load(dst, _) -> invalidated_by_write dst
   | Store(_, _) -> true  (* 保守处理，任何内存写操作都可能影响其他值 *)
-  | Call(_, _, _) -> true  (* 函数调用可能有副作用 *)
   | _ -> false
 
 (* 检查操作数是否是临时寄存器 *)
