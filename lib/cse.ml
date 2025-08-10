@@ -82,10 +82,10 @@ let apply_cse (block : ir_block) : ir_block =
           | None -> 
               add_defined_reg dst;
               binop :: acc)
-        else
-          (* 如果有操作数未定义，不应用CSE *)
+        else (
           add_defined_reg dst;
           binop :: acc
+        )
     
     | Unop (_, dst, src) as unop ->
         (* 只有当操作数是已定义的寄存器或立即数时才尝试CSE *)
@@ -108,10 +108,10 @@ let apply_cse (block : ir_block) : ir_block =
           | None -> 
               add_defined_reg dst;
               unop :: acc)
-        else
-          (* 如果有操作数未定义，不应用CSE *)
+        else (
           add_defined_reg dst;
           unop :: acc
+        )
     
     | Assign (dst, src) ->
         (* 对于赋值，我们只需要追踪目标寄存器 *)
