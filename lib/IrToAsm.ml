@@ -49,6 +49,19 @@ let store_operand allocation_map spill_base_offset source_reg dst =
           Printf.sprintf "\tsw %s, %d(sp)\n" source_reg (spill_base_offset + offset)
       | None -> ""
 
+let com_terminator allocation_map spill_base_offset epilogue_label term =
+  match term with
+  | TermGoto l -> Printf.sprintf "\tj %s\n" l
+  | TermSeq l -> Printf.sprintf "\tj %s\n" l
+  | TermIf (cond, l_true, l_false) ->
+      let cond_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" cond in
+      cond_code ^ Printf.sprintf "\tbne %s, x0, %s\n\tj %s\n" reg l_true l_false
+  | TermRet (Some op) ->
+      let load_code = load_operand allocation_map spill_base_offset "a0" op in
+      load_code ^ Printf.sprintf "\tj %s\n" epilogue_label
+  | TermRet None ->
+      Printf.sprintf "\tj %s\n" epilogue_label
+
 let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_base epilogue_label : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
@@ -90,7 +103,6 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
       let store_code = store_operand allocation_map spill_base_offset reg1 dst in
       code1 ^ store_code
   | Call (dst, fname, args) ->
-      (* 1. Identify which physical registers are currently active and need saving *)
       let active_phys_regs =
         Hashtbl.fold (fun _ alloc acc ->
           match alloc with
@@ -99,15 +111,11 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
         ) allocation_map []
         |> List.sort_uniq compare
       in
-      
-      (* 2. Save these active registers to the caller-save area *)
       let save_callers =
         List.mapi (fun i r -> Printf.sprintf "\tsw %s, %d(sp)\n" r (caller_save_base + i*4))
         active_phys_regs
         |> String.concat ""
       in
-
-      (* 3. Set up arguments for the call *)
       let args_code =
         List.mapi (fun i arg ->
           if i < 8 then
@@ -118,38 +126,25 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
         ) args
         |> String.concat ""
       in
-
-      (* 4. Restore the active registers after the call returns *)
       let restore_callers =
         List.mapi (fun i r -> Printf.sprintf "\tlw %s, %d(sp)\n" r (caller_save_base + i*4))
         active_phys_regs
         |> String.concat ""
       in
-
-      (* 5. Store the result from a0 into its final destination *)
       let store_result = store_operand allocation_map spill_base_offset "a0" dst in
-
       save_callers ^ args_code ^ Printf.sprintf "\tcall %s\n" fname ^ restore_callers ^ store_result
-  | Ret (Some op) ->
-      let load_code = load_operand allocation_map spill_base_offset "a0" op in
-      load_code ^ Printf.sprintf "\tj %s\n" epilogue_label
-  | Ret None -> Printf.sprintf "\tj %s\n" epilogue_label
-  | Goto label -> Printf.sprintf "\tj %s\n" label
-  | IfGoto (cond, label) ->
-      let cond_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" cond in
-      cond_code ^ Printf.sprintf "\tbne %s, x0, %s\n" reg label
-  | Label _ -> "" (* The block's label is now the source of truth *)
+  | Ret _ | Goto _ | IfGoto _ | Label _ -> "" (* Should not happen in optimized path *)
   | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
 
 let com_block_o (blk : ir_block) allocation_map spill_base_offset caller_save_base epilogue_label : string =
-  (blk.label |> Printf.sprintf "%s:\n") ^
-  (blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat "")
+  let insts_code = blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat "" in
+  let term_code = com_terminator allocation_map spill_base_offset epilogue_label blk.terminator in
+  Printf.sprintf "%s:\n" blk.label ^ insts_code ^ term_code
 
 let com_func_o (f : ir_func_o) : string =
   let intervals = LinearScan.build_intervals f in
   let allocation_map, num_spills = LinearScan.allocate intervals in
 
-  (* Pre-scan for max outgoing stack arguments to reserve space *)
   let max_outgoing_stack_args = List.fold_left (fun current_max block ->
     List.fold_left (fun m inst ->
       match inst with
@@ -165,7 +160,6 @@ let com_func_o (f : ir_func_o) : string =
   let ra_area = 4 in
   let stack_size = align_stack (outgoing_args_area + caller_save_area + spill_area + ra_area) in
   
-  (* Define base offsets for different areas relative to SP *)
   let _outgoing_args_base = 0 in
   let caller_save_base = outgoing_args_area in
   let ra_base = outgoing_args_area + caller_save_area in
@@ -177,10 +171,8 @@ let com_func_o (f : ir_func_o) : string =
   let args_code =
     List.mapi (fun i arg_name ->
       if i < 8 then
-        (* Argument is in a register, store it to its assigned location (reg or spill slot) *)
         store_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) (Var arg_name)
       else
-        (* Argument is on the stack. Load it into a temp reg, then store it. *)
         let arg_offset_on_stack = stack_size + ((i - 8) * 4) in
         let load_code = Printf.sprintf "\tlw t5, %d(sp)\n" arg_offset_on_stack in
         load_code ^ (store_operand allocation_map spill_base_offset "t5" (Var arg_name))
@@ -195,7 +187,6 @@ let com_func_o (f : ir_func_o) : string =
   in
 
   let body_code = f.blocks
-    (* Pass the epilogue label down to the instruction compiler *)
     |> List.map (fun blk -> com_block_o blk allocation_map spill_base_offset caller_save_base epilogue_label)
     |> String.concat ""
   in
