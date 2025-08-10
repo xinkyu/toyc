@@ -25,7 +25,7 @@ let apply_cse (block : ir_block) : ir_block =
   (* 处理单条指令 *)
   let process_inst inst acc =
     match inst with
-    | Binop (op, dst, lhs, rhs) as binop ->
+    | Binop (_, dst, _, _) as binop ->
         let sig_opt = make_signature binop in
         (match sig_opt with
         | Some signature ->
@@ -40,7 +40,7 @@ let apply_cse (block : ir_block) : ir_block =
                 binop :: acc)
         | None -> binop :: acc)
     
-    | Unop (op, dst, src) as unop ->
+    | Unop (_, dst, _) as unop ->
         let sig_opt = make_signature unop in
         (match sig_opt with
         | Some signature ->
