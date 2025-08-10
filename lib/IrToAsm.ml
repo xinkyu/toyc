@@ -1,4 +1,4 @@
-(* IrToAsm.ml *)
+(* IrToAsm.ml - 修复未使用变量警告 *)
 open Ir
 open LinearScan
 
@@ -203,7 +203,8 @@ let com_func_o (f : ir_func_o) : string =
   let stack_size = align_stack (outgoing_args_area + caller_save_area + spill_area + ra_area) in
   
   (* 定义相对于SP的不同区域的基址偏移 *)
-  let outgoing_args_base = 0 in
+  (* 删除或注释掉未使用的变量，修复警告 *)
+  (* let outgoing_args_base = 0 in *)
   let caller_save_base = outgoing_args_area in
   let ra_base = outgoing_args_area + caller_save_area in
   let spill_base_offset = outgoing_args_area + caller_save_area + ra_area in
