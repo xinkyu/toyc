@@ -113,5 +113,3 @@ Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset)
 end
 
 ) sorted_intervals;
-
-(allocation_map, !spill_offset * 4) (* Return total spill size in bytes *)
