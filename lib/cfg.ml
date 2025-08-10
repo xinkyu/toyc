@@ -208,4 +208,4 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
 let p04_common_subexpr = Cse.common_subexpr_elimination
 
 let optimize blocks =
-  blocks |> build_cfg |> constant_propagation |> p04_common_subexpr
+  blocks |> build_cfg |> constant_propagation (*|> p04_common_subexpr*)
