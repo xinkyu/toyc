@@ -33,7 +33,13 @@ let is_imm = function
   | Imm _ -> true
   | _ -> false
 
-(* 安全的CSE实现 - 只处理最简单和最安全的情况 *)
+(* 提取操作数中的所有寄存器/变量 *)
+let extract_regs op =
+  match op with
+  | Reg r | Var r -> [r]
+  | _ -> []
+
+(* 安全的CSE实现 - 更加保守的方法 *)
 let apply_cse (block : ir_block) : ir_block =
   (* 收集已经定义的寄存器名称 *)
   let defined_regs = Hashtbl.create 50 in
@@ -52,58 +58,93 @@ let apply_cse (block : ir_block) : ir_block =
     | _ -> ()
   ) block.insts;
   
-  (* 检查寄存器是否已定义 *)
-  let is_defined = function
-    | Reg r | Var r -> Hashtbl.mem defined_regs r
-    | Imm _ -> true
-  in
-  
-  (* 收集基本表达式 - 只考虑简单的二元运算和一元运算 *)
+  (* 表达式到寄存器的映射 *)
   let expr_map = Hashtbl.create 50 in
   
-  (* 第一遍：收集所有表达式 *)
-  List.iter (fun inst ->
-    match inst with
-    | Binop (_, dst, lhs, rhs) when is_defined lhs && is_defined rhs ->
-        let sig_opt = make_signature inst in
-        (match sig_opt with
-        | Some signature -> Hashtbl.replace expr_map signature dst
-        | None -> ())
-    | Unop (_, dst, src) when is_defined src ->
-        let sig_opt = make_signature inst in
-        (match sig_opt with
-        | Some signature -> Hashtbl.replace expr_map signature dst
-        | None -> ())
-    | _ -> ()
-  ) block.insts;
+  (* 更加安全的CSE - 跟踪活跃的寄存器 *)
+  let live_regs = Hashtbl.create 50 in
+  List.iter (fun r -> Hashtbl.add live_regs r ()) 
+    (List.fold_left (fun acc inst ->
+      match inst with
+      | Binop (_, _, lhs, rhs) -> 
+          acc @ (extract_regs lhs) @ (extract_regs rhs)
+      | Unop (_, _, src) -> 
+          acc @ (extract_regs src)
+      | Assign (_, src) ->
+          acc @ (extract_regs src)
+      | _ -> acc
+    ) [] block.insts);
   
-  (* 第二遍：应用优化，但只对安全的情况 *)
+  (* 处理单个指令 *)
   let process_inst inst =
     match inst with
-    | Binop (_, dst, lhs, rhs) as binop when is_defined lhs && is_defined rhs ->
-        let sig_opt = make_signature binop in
-        (match sig_opt with
-        | Some signature ->
-            (match Hashtbl.find_opt expr_map signature with
-            | Some existing_reg when is_defined existing_reg && not (same_reg existing_reg dst) ->
-                (* 已存在相同表达式，用Assign替代，但只有当existing_reg和dst不同时 *)
-                Assign (dst, existing_reg)
-            | _ -> inst)
-        | None -> inst)
-    | Unop (_, dst, src) as unop when is_defined src ->
-        let sig_opt = make_signature unop in
-        (match sig_opt with
-        | Some signature ->
-            (match Hashtbl.find_opt expr_map signature with
-            | Some existing_reg when is_defined existing_reg && not (same_reg existing_reg dst) ->
-                (* 已存在相同表达式，用Assign替代，但只有当existing_reg和dst不同时 *)
-                Assign (dst, existing_reg)
-            | _ -> inst)
-        | None -> inst)
-    | inst when has_side_effects inst ->
-        (* 对于有副作用的指令，清空表达式映射 *)
-        Hashtbl.clear expr_map;
+    | Binop (op, dst, lhs, rhs) as binop ->
+        (* 只考虑两个操作数都是已定义寄存器或立即数的情况 *)
+        (match (lhs, rhs) with
+        | (Reg l | Var l), (Reg r | Var r) 
+            when Hashtbl.mem live_regs l && Hashtbl.mem live_regs r ->
+            let sig_opt = make_signature binop in
+            (match sig_opt with
+            | Some signature ->
+                (match Hashtbl.find_opt expr_map signature with
+                | Some existing_reg when Hashtbl.mem live_regs (get_reg_name existing_reg) ->
+                    (* 使用已有表达式替代 *)
+                    Assign (dst, existing_reg)
+                | _ ->
+                    (* 记录新表达式 *)
+                    (match dst with
+                    | Reg d | Var d -> 
+                        Hashtbl.replace live_regs d ();
+                        (match sig_opt with
+                        | Some s -> Hashtbl.replace expr_map s dst
+                        | None -> ())
+                    | _ -> ());
+                    inst)
+            | None -> inst)
+        | _ -> inst)
+        
+    | Unop (op, dst, src) as unop ->
+        (* 只考虑操作数是已定义寄存器的情况 *)
+        (match src with
+        | Reg s | Var s when Hashtbl.mem live_regs s ->
+            let sig_opt = make_signature unop in
+            (match sig_opt with
+            | Some signature ->
+                (match Hashtbl.find_opt expr_map signature with
+                | Some existing_reg when Hashtbl.mem live_regs (get_reg_name existing_reg) ->
+                    (* 使用已有表达式替代 *)
+                    Assign (dst, existing_reg)
+                | _ ->
+                    (* 记录新表达式 *)
+                    (match dst with
+                    | Reg d | Var d -> 
+                        Hashtbl.replace live_regs d ();
+                        (match sig_opt with
+                        | Some s -> Hashtbl.replace expr_map s dst
+                        | None -> ())
+                    | _ -> ());
+                    inst)
+            | None -> inst)
+        | _ -> inst)
+        
+    | Assign (dst, _) ->
+        (* 更新活跃寄存器表 *)
+        (match dst with
+        | Reg d | Var d -> Hashtbl.replace live_regs d ()
+        | _ -> ());
         inst
+        
+    | Call _ ->
+        (* 对于函数调用，清空表达式映射（保守处理） *)
+        Hashtbl.clear expr_map;
+        (match inst with
+        | Call (dst, _, _) ->
+            (match dst with
+            | Reg d | Var d -> Hashtbl.replace live_regs d ()
+            | _ -> ())
+        | _ -> ());
+        inst
+        
     | _ -> inst
   in
   
