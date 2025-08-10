@@ -34,7 +34,7 @@ let build_intervals (func: ir_func_o) : interval list =
 
   (* 添加变量在终结符中的使用 *)
   let process_terminator block pos =
-    let term_def, term_use = match block.terminator with
+    let _, term_use = match block.terminator with  (* 使用_ 替代 term_def，表示我们不使用这个值 *)
       | TermIf (cond, _, _) -> 
           let names = match get_name cond with
             | Some n -> VSet.singleton n
@@ -55,7 +55,8 @@ let build_intervals (func: ir_func_o) : interval list =
   (* 处理所有基本块 *)
   let process_blocks () =
     List.iter (fun block ->
-      let block_live_out = LabelMap.find block.label live_out in
+      (* 移除未使用的变量，使用 _ 表示我们不需要这个值 *)
+      let _ = LabelMap.find_opt block.label live_out in
       
       (* 处理块中的每条指令及其活跃变量 *)
       List.iteri (fun i inst ->
