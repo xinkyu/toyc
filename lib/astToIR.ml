@@ -364,7 +364,14 @@ let func_ir (f : func_def) : ir_func =
     | Label _ :: rest_rev -> List.rev rest_rev
     | _ -> raw_code
   in
-  { name = f'.func_name; args = f'.params; body = bodycode }
+  (* Add a default return 0 for main if it falls off the end *)
+  let final_bodycode =
+    if f'.func_name = "main" && not (ends bodycode) then
+      bodycode @ [Ret (Some (Imm 0))]
+    else
+      bodycode
+  in
+  { name = f'.func_name; args = f'.params; body = final_bodycode }
 
 (* 线性IR -> 过程块IR *)
 let pblocks (insts : ir_inst list) : ir_block list =
