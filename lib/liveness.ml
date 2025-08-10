@@ -61,7 +61,7 @@ let def_use (inst : ir_inst) : VSet.t * VSet.t =
 *)
 let analyze (func: ir_func_o) : (VSet.t LabelMap.t * VSet.t LabelMap.t) =
   let blocks = func.blocks in
-  let block_map = List.fold_left (fun m b -> LabelMap.add b.label b m) LabelMap.empty blocks in
+  
   
   let live_in = ref LabelMap.empty in
   let live_out = ref LabelMap.empty in
