@@ -304,4 +304,17 @@ let com_func_non_opt (f : ir_func) : string =
     else body_code
   in
   let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -1600\n" f.name in
-  prologue ^ pae_se
+  prologue ^ pae_set ^ body_code
+
+(*******************************************************************)
+(* Program Entry Point *) 
+(*******************************************************************)
+
+let com_pro (prog : ir_program) : string =
+  let prologue = ".text\n.global main\n" in
+  let body_asm =
+    match prog with
+    | Ir_funcs funcs -> List.map com_func_non_opt funcs |> String.concat "\n"
+    | Ir_funcs_o funcs_o -> List.map com_func_o funcs_o |> String.concat "\n"
+  in
+  prologue ^ body_asm
