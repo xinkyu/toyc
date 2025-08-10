@@ -156,7 +156,7 @@ let com_func_o (f : ir_func_o) : string =
   let stack_size = align_stack (outgoing_args_area + caller_save_area + spill_area + ra_area) in
   
   (* Define base offsets for different areas relative to SP *)
-  let outgoing_args_base = 0 in
+  let _outgoing_args_base = 0 in
   let caller_save_base = outgoing_args_area in
   let ra_base = outgoing_args_area + caller_save_area in
   let spill_base_offset = outgoing_args_area + caller_save_area + ra_area in
