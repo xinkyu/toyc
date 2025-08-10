@@ -113,7 +113,7 @@ let apply_cse (block : ir_block) : ir_block =
           unop :: acc
         )
     
-    | Assign (dst, src) ->
+    | Assign (dst, _) ->
         (* 对于赋值，我们只需要追踪目标寄存器 *)
         add_defined_reg dst;
         inst :: acc
