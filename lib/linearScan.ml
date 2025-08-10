@@ -13,47 +13,47 @@ type interval = { var_name: string; start: int; finish: int; }
  This version uses the results of the dataflow-based liveness analysis.
 *)
 let build_intervals (func: ir_func_o) : interval list =
-  let live_in, live_out = Liveness.analyze func in
-let usage_map = ref VarMap.empty in
-let inst_num = ref 0 in
+  let _, live_out = Liveness.analyze func in
+  let usage_map = ref VarMap.empty in
+  let inst_num = ref 0 in
 
-(* Helper to record a use or def of a variable at a specific instruction number *)
-let add_usage var pos =
-let current_uses = try VarMap.find var !usage_map with Not_found -> [] in
-usage_map := VarMap.add var (pos :: current_uses) !usage_map
-in
+  let add_usage var pos =
+    let current_uses = try VarMap.find var !usage_map with Not_found -> [] in
+    usage_map := VarMap.add var (pos :: current_uses) !usage_map
+  in
 
-(* 1. For each instruction, find all variables that are live *)
-List.iter (fun block ->
-let live = ref (LabelMap.find block.label live_out) in
-List.iteri (fun i _ ->
-let inst = List.nth block.insts (List.length block.insts - 1 - i) in
-let current_pos = !inst_num + (List.length block.insts - 1 - i) in
+  List.iter (fun block ->
+    let live = ref (LabelMap.find block.label live_out) in
+    List.iteri (fun i _ ->
+      let inst_idx = List.length block.insts - 1 - i in
+      let inst = List.nth block.insts inst_idx in
+      let pos = !inst_num + inst_idx in
+      let def, use = Liveness.def_use inst in
 
-let def, use = Liveness.def_use inst in
+      (* The defined variable is live starting from this instruction *)
+      VSet.iter (fun v -> add_usage v pos) def;
+      
+      (* Variables in the live-out set are live through this instruction *)
+      VSet.iter (fun v -> add_usage v pos) !live;
 
-(* Any variable in live_out or use is live at this point *)
-VSet.iter (fun v -> add_usage v current_pos) !live;
-VSet.iter (fun v -> add_usage v current_pos) use;
+      (* Update live set for the preceding instruction *)
+      live := VSet.union use (VSet.diff !live def)
+    ) block.insts;
+    inst_num := !inst_num + List.length block.insts
+  ) func.blocks;
 
-(* Update the live set for the next instruction (previous in block) *)
-live := VSet.union use (VSet.diff !live def);
-) block.insts;
-inst_num := !inst_num + (List.length block.insts)
-) func.blocks;
-
-(* 2. For each variable, create an interval from its min to max usage point *)
-VarMap.fold (fun var uses acc ->
-if uses = [] then acc
-else
-let sorted_uses = List.sort_uniq compare uses in
-let new_interval : interval = { 
-var_name = var;
-start = List.hd sorted_uses; 
-finish = List.hd (List.rev sorted_uses);
-} in
-new_interval :: acc
-) !usage_map []
+  (* 2. For each variable, create an interval from its min to max usage point *)
+  VarMap.fold (fun var uses acc ->
+    if uses = [] then acc
+    else
+      let sorted_uses = List.sort_uniq compare uses in
+      let new_interval : interval = { 
+        var_name = var;
+        start = List.hd sorted_uses; 
+        finish = List.hd (List.rev sorted_uses);
+      } in
+      new_interval :: acc
+  ) !usage_map []
 
 type allocation_result =
 | PhysicalRegister of string
@@ -65,58 +65,65 @@ type allocation_result =
 let available_registers = ["t0"; "t1"; "t2"; "t3"; "t4"; "t5"]
 
 let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t * int =
-(* The final mapping from variable name to its location *)
-let allocation_map = Hashtbl.create (List.length intervals) in
+  (* The final mapping from variable name to its location *)
+  let allocation_map = Hashtbl.create (List.length intervals) in
 
-(* Sort intervals by increasing start point *)
-let sorted_intervals = List.sort (fun a b -> compare a.start b.start) intervals in
+  (* Sort intervals by increasing start point *)
+  let sorted_intervals = List.sort (fun a b -> compare a.start b.start) intervals in
 
-let active = ref [] : (interval * string) list ref in
-let free_registers = ref available_registers in
-let spill_offset = ref 0 in
+  let active = ref [] in
+  let free_registers = ref available_registers in
+  let spill_offset = ref 0 in
 
-List.iter (fun current_interval ->
-(* 1. Expire old intervals and remove any spilled intervals from active list *)
-let new_active = ref [] in
-List.iter (fun (active_interval, reg) ->
-  if active_interval.finish < current_interval.start then
-    (* This interval has expired, free its register *)
-    free_registers := reg :: !free_registers
-  else
-    (* This interval is still active, keep it *)
-    new_active := (active_interval, reg) :: !new_active
-) !active;
-active := List.sort (fun a b -> compare a.finish b.finish) !new_active;
+  List.iter (fun current_interval ->
+    (* 1. Expire old intervals and free their registers *)
+    let new_active = ref [] in
+    List.iter (fun (active_interval:interval) ->
+      if active_interval.finish >= current_interval.start then
+        (* This interval is still active, keep it *)
+        new_active := active_interval :: !new_active
+      else
+        (* This interval has expired, free its register *)
+        match Hashtbl.find allocation_map active_interval.var_name with
+        | PhysicalRegister reg -> free_registers := reg :: !free_registers
+        | StackSlot _ -> () (* Spilled intervals are not in active list *)
+    ) !active;
+    active := List.sort (fun a b -> compare a.finish b.finish) !new_active;
 
-(* 2. Try to allocate a register *)
-if (List.length !free_registers) > 0 then begin
-(* Allocate a free register *)
-let reg = List.hd !free_registers in
-free_registers := List.tl !free_registers;
+    (* 2. Try to allocate a register or spill *)
+    if (List.length !free_registers) > 0 then begin
+      (* Allocate a free register *)
+      let reg = List.hd !free_registers in
+      free_registers := List.tl !free_registers;
 
-Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
-active := List.sort (fun (a, _) (b, _) -> compare a.finish b.finish) ((current_interval, reg) :: !active);
-end else begin
-  (* No free registers, must spill *)
-  let farthest_active_interval, farthest_active_reg = List.hd (List.rev !active) in (* Get the interval with the largest finish point *)
+      Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
+      active := List.sort (fun a b -> compare a.finish b.finish) (current_interval :: !active);
+    end else begin
+      (* No free registers, must spill. Find the best candidate. *)
+      let spill_candidate = List.hd (List.rev !active) in (* Last element in active ends latest *)
 
-  if current_interval.finish < farthest_active_interval.finish then begin
-    (* Case 1: Spill current_interval *)
-    spill_offset := !spill_offset + 4;
-    Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset);
-  end else begin
-    (* Case 2: Spill farthest_active_interval *)
-    (* Remove farthest_active_interval from active list *)
-    active := List.filter (fun (i, _) -> i.var_name <> farthest_active_interval.var_name) !active;
+      if spill_candidate.finish > current_interval.finish then
+        (* Spill the active interval that ends latest *)
+        let reg_to_free =
+          match Hashtbl.find allocation_map spill_candidate.var_name with
+          | PhysicalRegister r -> r
+          | StackSlot _ -> failwith "Logic error: Active interval must have a physical register"
+        in
 
-    (* Assign StackSlot to farthest_active_interval *)
-    spill_offset := !spill_offset + 4;
-    Hashtbl.add allocation_map farthest_active_interval.var_name (StackSlot !spill_offset);
+        (* Re-assign: spill_candidate goes to stack, current_interval gets the freed register *)
+        spill_offset := !spill_offset + 4;
+        Hashtbl.replace allocation_map spill_candidate.var_name (StackSlot !spill_offset);
+        Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg_to_free);
 
-    (* Assign farthest_active_interval's register to current_interval *)
-    Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister farthest_active_reg);
-    active := List.sort (fun (a, _) (b, _) -> compare a.finish b.finish) ((current_interval, farthest_active_reg) :: !active);
-  end
-end
+        (* Update the active list: remove the spilled interval, add the new one, and re-sort *)
+        let updated_active = current_interval :: (List.filter (fun i -> i.var_name <> spill_candidate.var_name) !active) in
+        active := List.sort (fun a b -> compare a.finish b.finish) updated_active
+      else
+        (* Spill the current interval, as it ends later than any active one *)
+        spill_offset := !spill_offset + 4;
+        Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset)
+    end
 
-) sorted_intervals;
+  ) sorted_intervals;
+
+  (allocation_map, !spill_offset * 4) (* Return total spill size in bytes *)
