@@ -1,5 +1,4 @@
 open Ir
-open Regalloc
 
 let stack_offset = ref 0
 let v_env = Hashtbl.create 1600
@@ -25,8 +24,7 @@ let l_operand (reg : string) (op : operand) : string =
   | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
   | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
 
-(* Original instruction compiler - keep this for backup *)
-let original_com_inst (inst : ir_inst) : string =
+let com_inst (inst : ir_inst) : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
       let dst_off =
@@ -74,6 +72,7 @@ let original_com_inst (inst : ir_inst) : string =
       in
       let load_src = l_operand "t0" src in
       load_src ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+  (* Not used *)
   | Load (dst, src) ->
       let dst_off =
         all_st
@@ -81,6 +80,7 @@ let original_com_inst (inst : ir_inst) : string =
       in
       let src_code = l_operand "t1" src in
       src_code ^ "\tlw t0, 0(t1)\n" ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+  (* Not used *)
   | Store (dst, src) ->
       let dst_code = l_operand "t1" dst in
       let src_code = l_operand "t2" src in
@@ -119,34 +119,8 @@ let original_com_inst (inst : ir_inst) : string =
       cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
   | Label label -> Printf.sprintf "%s:\n" label
 
-(* Look up a variable's register assignment *)
-let lookup_var var reg_alloc =
-  try
-    let (_, reg_opt, spill_opt) = 
-      List.find (fun (v, _, _) -> v = var) reg_alloc 
-    in
-    (reg_opt, spill_opt)
-  with Not_found -> (None, None)
-
-(* New instruction compiler with register allocation *)
-let regalloc_com_inst reg_alloc (inst : ir_inst) : string =
-  match inst with
-  | Binop (op, dst, lhs, rhs) ->
-      let dst_var = match dst with Reg r | Var r -> r | _ -> failwith "Bad dst" in
-      let (dst_reg_opt, _) = lookup_var dst_var reg_alloc in
-      
-      let dst_reg = match dst_reg_opt with 
-        | Some r -> r 
-        | None -> "t0" 
-      in
-      
-      (* For now, just use the original implementation *)
-      original_com_inst inst
-  
-  | _ -> original_com_inst inst
-
 let com_block (blk : ir_block) : string =
-  blk.insts |> List.map original_com_inst |> String.concat ""
+  blk.insts |> List.map com_inst |> String.concat ""
 
 let com_func (f : ir_func) : string =
   Hashtbl.clear v_env;
@@ -172,10 +146,7 @@ let com_func (f : ir_func) : string =
     pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra")
   in
 
-  (* Compute register allocation but don't use it yet *)
-  let _ = allocate_registers f in
-  
-  let body_code = f.body |> List.map original_com_inst |> String.concat "" in
+  let body_code = f.body |> List.map com_inst |> String.concat "" in
 
   let body_code =
     if not (String.ends_with ~suffix:"\tret\n" body_code) then
