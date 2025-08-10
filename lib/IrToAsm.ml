@@ -62,7 +62,7 @@ let com_terminator allocation_map spill_base_offset epilogue_label term =
   | TermRet None ->
       Printf.sprintf "\tj %s\n" epilogue_label
 
-let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_base epilogue_label : string =
+let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_base : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" lhs in
@@ -137,7 +137,7 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
   | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
 
 let com_block_o (blk : ir_block) allocation_map spill_base_offset caller_save_base epilogue_label : string =
-  let insts_code = blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat "" in
+  let insts_code = blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base) |> String.concat "" in
   let term_code = com_terminator allocation_map spill_base_offset epilogue_label blk.terminator in
   Printf.sprintf "%s:\n" blk.label ^ insts_code ^ term_code
 
