@@ -13,7 +13,6 @@ type interval = { var_name: string; start: int; finish: int; }
  This version uses the results of the dataflow-based liveness analysis.
 *)
 let build_intervals (func: ir_func_o) : interval list =
-  let live_in, live_out = Liveness.analyze func in
   let _, live_out = Liveness.analyze func in
 let usage_map = ref VarMap.empty in
 let inst_num = ref 0 in
