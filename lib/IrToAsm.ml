@@ -1,210 +1,273 @@
+(* IrToAsm.ml *)
 open Ir
+open Liveness
+open LinearScan
 
-let stack_offset = ref 0
-let v_env = Hashtbl.create 1600
+(*******************************************************************)
+(* Optimized Code Generation (with Register Allocation) *)
+(*******************************************************************)
 
-let get_sto var =
-  try Hashtbl.find v_env var
-  with Not_found -> failwith ("Unknown variable: " ^ var)
+(* Helper to align stack size to 16 bytes *)
+let align_stack size =
+  if size mod 16 == 0 then size
+  else size + (16 - (size mod 16))
 
-(* 变量是否已经在符号表里面了, 存在则直接返回偏移, 否则分配新偏移 *)
-let all_st var =
-  try get_sto var
-  with _ ->
-    stack_offset := !stack_offset + 4;
-    Hashtbl.add v_env var !stack_offset;
-    !stack_offset
-
-let operand_str = function
-  | Reg r | Var r -> Printf.sprintf "%d(sp)" (get_sto r)
-  | Imm i -> Printf.sprintf "%d" i
-
-let l_operand (reg : string) (op : operand) : string =
+let load_operand allocation_map spill_base_offset target_reg op =
   match op with
-  | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
-  | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
+  | Imm i -> Printf.sprintf "\tli %s, %d\n" target_reg i
+  | Reg r | Var r ->
+      match Hashtbl.find_opt allocation_map r with
+      | Some (PhysicalRegister phys_reg) ->
+          if phys_reg <> target_reg then
+            Printf.sprintf "\tmv %s, %s\n" target_reg phys_reg
+          else
+            ""
+      | Some (StackSlot offset) ->
+          Printf.sprintf "\tlw %s, %d(sp)\n" target_reg (spill_base_offset + offset)
+      | None -> "" (* Unused variable *)
 
-let com_inst (inst : ir_inst) : string =
+let ensure_in_reg allocation_map spill_base_offset temp_reg op =
+  match op with
+  | Imm i -> (Printf.sprintf "\tli %s, %d\n" temp_reg i, temp_reg)
+  | Reg r | Var r ->
+      match Hashtbl.find_opt allocation_map r with
+      | Some (PhysicalRegister phys_reg) -> ("", phys_reg)
+      | Some (StackSlot offset) ->
+          (Printf.sprintf "\tlw %s, %d(sp)\n" temp_reg (spill_base_offset + offset), temp_reg)
+      | None -> ("", temp_reg)
+
+let store_operand allocation_map spill_base_offset source_reg dst =
+  match dst with
+  | Imm _ -> failwith "Cannot assign to an immediate"
+  | Reg r | Var r ->
+      match Hashtbl.find_opt allocation_map r with
+      | Some (PhysicalRegister phys_reg) ->
+          if phys_reg <> source_reg then
+            Printf.sprintf "\tmv %s, %s\n" phys_reg source_reg
+          else
+            ""
+      | Some (StackSlot offset) ->
+          Printf.sprintf "\tsw %s, %d(sp)\n" source_reg (spill_base_offset + offset)
+      | None -> ""
+
+let com_inst_o (inst : ir_inst) allocation_map spill_base_offset : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let lhs_code = l_operand "t1" lhs in
-      let rhs_code = l_operand "t2" rhs in
+      let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" lhs in
+      let code2, reg2 = ensure_in_reg allocation_map spill_base_offset "t6" rhs in
       let op_code =
         match op with
-        | "+" -> "\tadd t0, t1, t2\n"
-        | "-" -> "\tsub t0, t1, t2\n"
-        | "*" -> "\tmul t0, t1, t2\n"
-        | "/" -> "\tdiv t0, t1, t2\n"
-        | "%" -> "\trem t0, t1, t2\n"
-        | "==" -> "\tsub t0, t1, t2\n\tseqz t0, t0\n"
-        | "!=" -> "\tsub t0, t1, t2\n\tsnez t0, t0\n"
-        | "<=" -> "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
-        | ">=" -> "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
-        | "<" -> "\tslt t0, t1, t2\n"
-        | ">" -> "\tsgt t0, t1, t2\n"
-        | "&&" -> "\tand t0, t1, t2\n"
-        | "||" -> "\tor t0, t1, t2\n"
+        | "+" -> Printf.sprintf "\tadd t5, %s, %s\n" reg1 reg2
+        | "-" -> Printf.sprintf "\tsub t5, %s, %s\n" reg1 reg2
+        | "*" -> Printf.sprintf "\tmul t5, %s, %s\n" reg1 reg2
+        | "/" -> Printf.sprintf "\tdiv t5, %s, %s\n" reg1 reg2
+        | "%" -> Printf.sprintf "\trem t5, %s, %s\n" reg1 reg2
+        | "==" -> Printf.sprintf "\tsub t5, %s, %s\n\tseqz t5, t5\n" reg1 reg2
+        | "!=" -> Printf.sprintf "\tsub t5, %s, %s\n\tsnez t5, t5\n" reg1 reg2
+        | "<=" -> Printf.sprintf "\tsgt t5, %s, %s\n\txori t5, t5, 1\n" reg1 reg2
+        | ">=" -> Printf.sprintf "\tslt t5, %s, %s\n\txori t5, t5, 1\n" reg1 reg2
+        | "<" -> Printf.sprintf "\tslt t5, %s, %s\n" reg1 reg2
+        | ">" -> Printf.sprintf "\tsgt t5, %s, %s\n" reg1 reg2
+        | "&&" -> Printf.sprintf "\tand t5, %s, %s\n" reg1 reg2
+        | "||" -> Printf.sprintf "\tor t5, %s, %s\n" reg1 reg2
         | _ -> failwith ("Unknown binop: " ^ op)
       in
-      lhs_code ^ rhs_code ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+      let store_code = store_operand allocation_map spill_base_offset "t5" dst in
+      code1 ^ code2 ^ op_code ^ store_code
   | Unop (op, dst, src) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let load_src = l_operand "t1" src in
+      let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" src in
       let op_code =
         match op with
-        | "-" -> "\tneg t0, t1\n"
-        | "!" -> "\tseqz t0, t1\n"
-        | "+" -> "\tmv t0, t1\n"
+        | "-" -> "\tneg t5, t5\n"
+        | "!" -> "\tseqz t5, t5\n"
+        | "+" -> ""
         | _ -> failwith ("Unknown unop: " ^ op)
       in
-      load_src ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+      let effective_reg = if op = "+" then reg1 else "t5" in
+      let store_code = store_operand allocation_map spill_base_offset effective_reg dst in
+      code1 ^ op_code ^ store_code
   | Assign (dst, src) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let load_src = l_operand "t0" src in
-      load_src ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  (* Not used *)
-  | Load (dst, src) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let src_code = l_operand "t1" src in
-      src_code ^ "\tlw t0, 0(t1)\n" ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  (* Not used *)
-  | Store (dst, src) ->
-      let dst_code = l_operand "t1" dst in
-      let src_code = l_operand "t2" src in
-      dst_code ^ src_code ^ "\tsw t2, 0(t1)\n"
+      let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" src in
+      let store_code = store_operand allocation_map spill_base_offset reg1 dst in
+      code1 ^ store_code
   | Call (dst, fname, args) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let args_code =
-        List.mapi
-          (fun i arg ->
-            if i < 8 then l_operand (Printf.sprintf "a%d" i) arg
-            else
-              let offset = 4 * (i - 8) in
-              l_operand "t0" arg ^ Printf.sprintf "\tsw t0, %d(sp)\n" (-1600 - offset))
-          args
+      let caller_save_area = List.length available_registers * 4 in
+      let save_callers =
+        List.mapi (fun i r -> Printf.sprintf "\tsw %s, %d(sp)\n" r (i*4)) available_registers
         |> String.concat ""
       in
-      args_code ^ Printf.sprintf "\tcall %s\n\tsw a0, %d(sp)\n" fname dst_off
-  | Ret None ->
-      let ra_offset = get_sto "ra" in
-      Printf.sprintf
-        "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-        ra_offset
-  | Ret (Some op) ->
-      let load_code = l_operand "a0" op in
-      let ra_offset = get_sto "ra" in
-      load_code
-      ^ Printf.sprintf
-          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-          ra_offset
+      let args_code =
+        List.mapi (fun i arg ->
+          if i < 8 then
+            load_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) arg
+          else
+            let arg_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" arg in
+            arg_code ^ Printf.sprintf "\tsw %s, %d(sp)\n" reg (caller_save_area + (i-8)*4)
+        ) args
+        |> String.concat ""
+      in
+      let restore_callers =
+        List.mapi (fun i r -> Printf.sprintf "\tlw %s, %d(sp)\n" r (i*4)) available_registers
+        |> String.concat ""
+      in
+      let store_result = store_operand allocation_map spill_base_offset "a0" dst in
+      save_callers ^ args_code ^ Printf.sprintf "\tcall %s\n" fname ^ restore_callers ^ store_result
+  | Ret (Some op) -> load_operand allocation_map spill_base_offset "a0" op
+  | Ret None -> ""
   | Goto label -> Printf.sprintf "\tj %s\n" label
   | IfGoto (cond, label) ->
-      let cond_code = l_operand "t0" cond in
-      cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
+      let cond_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" cond in
+      cond_code ^ Printf.sprintf "\tbne %s, x0, %s\n" reg label
   | Label label -> Printf.sprintf "%s:\n" label
+  | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
 
-let com_block (blk : ir_block) : string =
-  blk.insts |> List.map com_inst |> String.concat ""
-
-let com_func (f : ir_func) : string =
-  Hashtbl.clear v_env;
-  stack_offset := 0;
-
-  (* 参数入栈 *)
-  let pae_set =
-    List.mapi
-      (fun i name ->
-        let off = all_st name in
-        if i < 8 then Printf.sprintf "\tsw a%d, %d(sp)\n" i off
-        else
-          Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
-            (* offset 为 call 语句将第 i 个参数压入的偏移 *)
-            (-4 * (i - 8))
-            off)
-      f.args
-    |> String.concat ""
-  in
-
-  (* ra 入栈 *)
-  let pae_set =
-    pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra")
-  in
-
-  let body_code = f.body |> List.map com_inst |> String.concat "" in
-
-  let body_code =
-    if not (String.ends_with ~suffix:"\tret\n" body_code) then
-      body_code
-      ^ Printf.sprintf
-          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-          (get_sto "ra")
-    else body_code
-  in
-  let func_label = f.name in
-  let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -1600\n" func_label in
-  prologue ^ pae_set ^ body_code
+let com_block_o (blk : ir_block) allocation_map spill_base_offset : string =
+  blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset) |> String.concat ""
 
 let com_func_o (f : ir_func_o) : string =
-  Hashtbl.clear v_env;
-  stack_offset := 0;
+  let _, live_out = Liveness.analyze f in
+  let intervals = LinearScan.build_intervals f live_out in
+  let allocation_map, num_spills = LinearScan.allocate intervals in
+  let caller_save_area = List.length available_registers * 4 in
+  let spill_area = num_spills in
+  let ra_area = 4 in
+  let stack_size = align_stack (caller_save_area + spill_area + ra_area) in
+  let spill_base_offset = caller_save_area + ra_area in
+  let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -%d\n\tsw ra, %d(sp)\n"
+    f.name stack_size caller_save_area
+  in
+  let args_code =
+    List.mapi (fun i arg_name ->
+      if i < 8 then
+        store_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) (Var arg_name)
+      else
+        failwith "Stack arguments not yet implemented in optimized compiler"
+    ) f.args
+    |> String.concat ""
+  in
+  let body_code = f.blocks
+    |> List.map (fun blk -> com_block_o blk allocation_map spill_base_offset)
+    |> String.concat ""
+  in
+  let epilogue =
+    Printf.sprintf "\tlw ra, %d(sp)\n\taddi sp, sp, %d\n\tret\n"
+      caller_save_area stack_size
+  in
+  let final_body = if String.ends_with ~suffix:"\tret\n" body_code then body_code else body_code ^ epilogue in
+  prologue ^ args_code ^ final_body
 
+(*******************************************************************)
+(* Original Non-Optimized Code Generation (Spill-Everything) *)
+(*******************************************************************)
+
+let com_func_non_opt (f : ir_func) : string =
+  let v_env = Hashtbl.create 1600 in
+  let stack_offset = ref 0 in
+  let get_sto var = try Hashtbl.find v_env var with Not_found -> failwith ("Unknown variable: " ^ var) in
+  let all_st var =
+    try get_sto var
+    with _ ->
+      stack_offset := !stack_offset + 4;
+      Hashtbl.add v_env var !stack_offset;
+      !stack_offset
+  in
+  let l_operand reg op =
+    match op with
+    | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
+    | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
+  in
+  let rec com_inst_non_opt (inst : ir_inst) : string =
+    match inst with
+    | Binop (op, dst, lhs, rhs) ->
+        let dst_off = all_st (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst") in
+        let lhs_code = l_operand "t1" lhs in
+        let rhs_code = l_operand "t2" rhs in
+        let op_code =
+          match op with
+          | "+" -> "\tadd t0, t1, t2\n"
+          | "-" -> "\tsub t0, t1, t2\n"
+          | "*" -> "\tmul t0, t1, t2\n"
+          | "/" -> "\tdiv t0, t1, t2\n"
+          | "%" -> "\trem t0, t1, t2\n"
+          | "==" -> "\tsub t0, t1, t2\n\tseqz t0, t0\n"
+          | "!=" -> "\tsub t0, t1, t2\n\tsnez t0, t0\n"
+          | "<=" -> "\tsgt t0, t1, t2\n\txori t0, t0, 1\n"
+          | ">=" -> "\tslt t0, t1, t2\n\txori t0, t0, 1\n"
+          | "<" -> "\tslt t0, t1, t2\n"
+          | ">" -> "\tsgt t0, t1, t2\n"
+          | "&&" -> "\tand t0, t1, t2\n"
+          | "||" -> "\tor t0, t1, t2\n"
+          | _ -> failwith ("Unknown binop: " ^ op)
+        in
+        lhs_code ^ rhs_code ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+    | Unop (op, dst, src) ->
+        let dst_off = all_st (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst") in
+        let load_src = l_operand "t1" src in
+        let op_code =
+          match op with
+          | "-" -> "\tneg t0, t1\n"
+          | "!" -> "\tseqz t0, t1\n"
+          | "+" -> "\tmv t0, t1\n"
+          | _ -> failwith ("Unknown unop: " ^ op)
+        in
+        load_src ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+    | Assign (dst, src) ->
+        let dst_off = all_st (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst") in
+        let load_src = l_operand "t0" src in
+        load_src ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+    | Call (dst, fname, args) ->
+        let dst_off = all_st (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst") in
+        let args_code =
+          List.mapi
+            (fun i arg ->
+              if i < 8 then l_operand (Printf.sprintf "a%d" i) arg
+              else
+                let offset = 4 * (i - 8) in
+                l_operand "t0" arg ^ Printf.sprintf "\tsw t0, %d(sp)\n" (-1600 - offset))
+            args
+          |> String.concat ""
+        in
+        args_code ^ Printf.sprintf "\tcall %s\n\tsw a0, %d(sp)\n" fname dst_off
+    | Ret None -> Printf.sprintf "\tlw ra, %d(sp)\n\taddi sp, sp, 1600\n\tret\n" (get_sto "ra")
+    | Ret (Some op) ->
+        let load_code = l_operand "a0" op in
+        load_code ^ Printf.sprintf "\tlw ra, %d(sp)\n\taddi sp, sp, 1600\n\tret\n" (get_sto "ra")
+    | Goto label -> Printf.sprintf "\tj %s\n" label
+    | IfGoto (cond, label) ->
+        let cond_code = l_operand "t0" cond in
+        cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
+    | Label label -> Printf.sprintf "%s:\n" label
+    | Load _ | Store _ -> failwith "Load/Store IR instructions not supported"
+  in
   let pae_set =
     List.mapi
       (fun i name ->
         let off = all_st name in
         if i < 8 then Printf.sprintf "\tsw a%d, %d(sp)\n" i off
         else
-          Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n"
-            (* offset 为 call 语句将第 i 个参数压入的偏移 *)
-            (-4 * (i - 8))
-            off)
+          Printf.sprintf "\tlw t0, %d(sp)\n\tsw t0, %d(sp)\n" (-4 * (i - 8)) off)
       f.args
     |> String.concat ""
   in
-
-  (* ra 入栈 *)
-  let pae_set =
-    pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra")
-  in
-
-  let body_code = f.blocks |> List.map com_block |> String.concat "" in
-
-  (* 检查 body_code 是否以 ret 结束; 没有默认添加 "\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n" 语句; 其实可以前移到 IR 阶段 *)
-  let body_code =
+  let pae_set = pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra") in
+  let body_code = f.body |> List.map com_inst_non_opt |> String.concat "" in
+  let body_code = 
     if not (String.ends_with ~suffix:"\tret\n" body_code) then
-      body_code
-      ^ Printf.sprintf
-          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
-          (get_sto "ra")
+      body_code ^ Printf.sprintf "\tlw ra, %d(sp)\n\taddi sp, sp, 1600\n\tret\n" (get_sto "ra")
     else body_code
   in
-
-  let func_label = f.name in
-  let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -1600\n" func_label in
+  let prologue = Printf.sprintf "%s:\n\taddi sp, sp, -1600\n" f.name in
   prologue ^ pae_set ^ body_code
 
+(*******************************************************************)
+(* Program Entry Point *) 
+(*******************************************************************)
+
 let com_pro (prog : ir_program) : string =
-  let prologue = ".text\n .global main\n" in
+  let prologue = ".text\n.global main\n" in
   let body_asm =
     match prog with
-    | Ir_funcs funcs -> List.map com_func funcs |> String.concat "\n"
-    | Ir_funcs_o funcs_o ->
-        List.map com_func_o funcs_o |> String.concat "\n"
+    | Ir_funcs funcs -> List.map com_func_non_opt funcs |> String.concat "\n"
+    | Ir_funcs_o funcs_o -> List.map com_func_o funcs_o |> String.concat "\n"
   in
   prologue ^ body_asm

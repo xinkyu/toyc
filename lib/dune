@@ -1,6 +1,6 @@
 (library
  (name compilerlib)
- (modules ast lexer parser astToIR ir cfg cse IrToAsm print_ast print_ir))
+ (modules ast lexer parser astToIR ir cfg cse liveness linearScan IrToAsm print_ast print_ir))
 
 (rule
  (targets parser.ml parser.mli parser.output)
