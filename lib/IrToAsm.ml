@@ -1,33 +1,29 @@
-(* IrToAsm.ml *)
 open Ir
 
-let v_env = Hashtbl.create 100
 let stack_offset = ref 0
+let v_env = Hashtbl.create 1600
 
-(* 分配栈空间 *)
-let all_st name =
-  match Hashtbl.find_opt v_env name with
-  | Some off -> off
-  | None ->
-      let off = !stack_offset in
-      stack_offset := !stack_offset + 4;
-      Hashtbl.add v_env name off;
-      off
+let get_sto var =
+  try Hashtbl.find v_env var
+  with Not_found -> failwith ("Unknown variable: " ^ var)
 
-(* 获取栈偏移 *)
-let get_sto name =
-  match Hashtbl.find_opt v_env name with
-  | Some off -> off
-  | None -> failwith ("Variable not found: " ^ name)
+(* 变量是否已经在符号表里面了, 存在则直接返回偏移, 否则分配新偏移 *)
+let all_st var =
+  try get_sto var
+  with _ ->
+    stack_offset := !stack_offset + 4;
+    Hashtbl.add v_env var !stack_offset;
+    !stack_offset
 
-(* 加载操作数到寄存器 *)
-let l_operand reg = function
+let operand_str = function
+  | Reg r | Var r -> Printf.sprintf "%d(sp)" (get_sto r)
+  | Imm i -> Printf.sprintf "%d" i
+
+let l_operand (reg : string) (op : operand) : string =
+  match op with
   | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
-  | Reg r | Var r ->
-      let off = get_sto r in
-      Printf.sprintf "\tlw %s, %d(sp)\n" reg off
+  | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
 
-(* 生成指令 *)
 let com_inst (inst : ir_inst) : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
@@ -69,24 +65,6 @@ let com_inst (inst : ir_inst) : string =
         | _ -> failwith ("Unknown unop: " ^ op)
       in
       load_src ^ op_code ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  | Call (dst, fname, args) ->
-      let dst_off =
-        all_st
-          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
-      in
-      let save_args =
-        List.mapi
-          (fun i arg ->
-            let load = l_operand "t0" arg in
-            if i < 8 then load ^ Printf.sprintf "\tmv a%d, t0\n" i
-            else
-              load
-              ^ Printf.sprintf "\tsw t0, %d(sp)\n" (-4 * (i - 8 + 1)))
-          args
-        |> String.concat ""
-      in
-      save_args ^ Printf.sprintf "\tcall %s\n" fname
-      ^ Printf.sprintf "\tsw a0, %d(sp)\n" dst_off
   | Assign (dst, src) ->
       let dst_off =
         all_st
@@ -94,27 +72,52 @@ let com_inst (inst : ir_inst) : string =
       in
       let load_src = l_operand "t0" src in
       load_src ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  | Load (dst, addr) ->
+  (* Not used *)
+  | Load (dst, src) ->
       let dst_off =
         all_st
           (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
       in
-      let load_addr = l_operand "t0" addr in
-      load_addr ^ "\tlw t1, 0(t0)\n"
-      ^ Printf.sprintf "\tsw t1, %d(sp)\n" dst_off
-  | Store (addr, value) ->
-      let load_addr = l_operand "t0" addr in
-      let load_value = l_operand "t1" value in
-      load_addr ^ load_value ^ "\tsw t1, 0(t0)\n"
-  | Ret None -> "\tlw ra, %d(sp)\n\taddi sp, sp, 1600\n\tret\n"
+      let src_code = l_operand "t1" src in
+      src_code ^ "\tlw t0, 0(t1)\n" ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
+  (* Not used *)
+  | Store (dst, src) ->
+      let dst_code = l_operand "t1" dst in
+      let src_code = l_operand "t2" src in
+      dst_code ^ src_code ^ "\tsw t2, 0(t1)\n"
+  | Call (dst, fname, args) ->
+      let dst_off =
+        all_st
+          (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst")
+      in
+      let args_code =
+        List.mapi
+          (fun i arg ->
+            if i < 8 then l_operand (Printf.sprintf "a%d" i) arg
+            else
+              let offset = 4 * (i - 8) in
+              l_operand "t0" arg ^ Printf.sprintf "\tsw t0, %d(sp)\n" (-1600 - offset))
+          args
+        |> String.concat ""
+      in
+      args_code ^ Printf.sprintf "\tcall %s\n\tsw a0, %d(sp)\n" fname dst_off
+  | Ret None ->
+      let ra_offset = get_sto "ra" in
+      Printf.sprintf
+        "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
+        ra_offset
   | Ret (Some op) ->
-      let load = l_operand "a0" op in
-      load ^ "\tlw ra, %d(sp)\n\taddi sp, sp, 1600\n\tret\n"
-  | Label l -> Printf.sprintf "%s:\n" l
-  | Goto l -> Printf.sprintf "\tj %s\n" l
-  | IfGoto (cond, l) ->
-      let load = l_operand "t0" cond in
-      load ^ Printf.sprintf "\tbnez t0, %s\n" l
+      let load_code = l_operand "a0" op in
+      let ra_offset = get_sto "ra" in
+      load_code
+      ^ Printf.sprintf
+          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
+          ra_offset
+  | Goto label -> Printf.sprintf "\tj %s\n" label
+  | IfGoto (cond, label) ->
+      let cond_code = l_operand "t0" cond in
+      cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
+  | Label label -> Printf.sprintf "%s:\n" label
 
 let com_block (blk : ir_block) : string =
   blk.insts |> List.map com_inst |> String.concat ""
@@ -201,6 +204,7 @@ let com_pro (prog : ir_program) : string =
   let body_asm =
     match prog with
     | Ir_funcs funcs -> List.map com_func funcs |> String.concat "\n"
-    | Ir_funcs_o funcs_o -> List.map com_func_o funcs_o |> String.concat "\n"
+    | Ir_funcs_o funcs_o ->
+        List.map com_func_o funcs_o |> String.concat "\n"
   in
   prologue ^ body_asm

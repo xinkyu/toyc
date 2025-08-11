@@ -1,4 +1,4 @@
-(* astToIR.ml *)
+(*astToIR.ml*)
 open Ast
 open Ir
 
@@ -21,8 +21,8 @@ end
 
 type context = {
   env_stack : Envs.t ref;
-  break_lbl : string option;
-  continue_lbl : string option;
+  break_lbl : string option; (* break 跳转目标 *)
+  continue_lbl : string option; (* continue 跳转目标 *)
 }
 
 module LabelMap = Map.Make (String)
@@ -35,8 +35,7 @@ let ftemp () =
   Reg ("t" ^ string_of_int id)
 
 let nameid = ref 0
-let fname base = let id = !nameid in incr nameid;
-  base ^ "_" ^ string_of_int id
+let fname base = let id = !nameid in incr nameid; base ^ "_" ^ string_of_int id
 
 let labelid = ref 0
 let irlabid = ref 0
@@ -48,6 +47,7 @@ let flabel () =
 
 let fIRlabel (labelmap : string LabelMap.t) (l : param) :
     string * string LabelMap.t =
+  (* 先查找 l 是否已经分配了 label，如果有直接返回，否则分配新 label，并写回 map *)
   match LabelMap.find_opt l labelmap with
   | Some lbl -> (lbl, labelmap)
   | None ->
@@ -57,6 +57,7 @@ let fIRlabel (labelmap : string LabelMap.t) (l : param) :
       let labelmap' = LabelMap.add l lbl labelmap in
       (lbl, labelmap')
 
+(* 操作符到字符串映射 *)
 let string_binop = function
   | Add -> "+"
   | Sub -> "-"
@@ -74,16 +75,20 @@ let string_binop = function
 
 let string_unop = function Not -> "!" | Plus -> "+" | Minus -> "-"
 
+(* stmt_res 用于处理 return 终止：Normal/Returned 两种结果 *)
 type stmt_res = Normal of ir_inst list | Returned of ir_inst list
 
+(* 将 stmt_res 展平为代码列表 *)
 let flatten = function Normal code | Returned code -> code
 
+(* 检查代码段最后一条是否是 Goto 指定标签或 Return *)
 let ends insts =
   match List.rev insts with
   | Goto _ :: _ -> true
   | Ret _ :: _ -> true
   | _ -> false
 
+(* 表达式转换：返回目标寄存器和 IR 指令列表 *)
 let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
   match e with
   | Number n -> (Imm n, [])
@@ -96,14 +101,16 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
       | Imm n ->
           let folded =
             match op with
-            | Plus -> Imm n
-            | Minus -> Imm (-n)
+            | Plus -> Imm n (* +n = n *)
+            | Minus -> Imm (-n) (* -n *)
             | Not -> Imm (if n = 0 then 1 else 0)
+            (* !n *)
           in
           (folded, code)
       | _ ->
           let res = ftemp () in
           (res, code @ [ Unop (string_unop op, res, operand) ]))
+  
   | Binop (op, e1, e2) -> (
       let lhs, c1 = expr_ir ctx e1 in
       let rhs, c2 = expr_ir ctx e2 in
@@ -122,13 +129,14 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
             | Leq -> Imm (if a <= b then 1 else 0)
             | Greater -> Imm (if a > b then 1 else 0)
             | Geq -> Imm (if a >= b then 1 else 0)
-            | Lor | Land -> failwith "Short-circuit operators should be handled by dstmt"
+            | Lor | Land -> failwith "Never touched"
           in
           (folded, c1 @ c2)
       | _ ->
           let dst = ftemp () in
           (dst, c1 @ c2 @ [ Binop (string_binop op, dst, lhs, rhs) ]))
   | Call (f, args) ->
+      (* 参数顺序按出现顺序计算 *)
       let codes, oprs =
         List.fold_left
           (fun (acc_code, acc_opr) arg ->
@@ -139,27 +147,32 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
       let ret = ftemp () in
       (ret, codes @ [ Call (ret, f, oprs) ])
 
+(* 将 if(cond, then_b, else_b) 里的 cond 展开 *)
 let rec dstmt = function
   | If (cond, then_b, Some else_b) ->
       let ands = split_and cond in
       if List.length ands > 1 then
+        (* a && b && c => nested if a then if b then if c ... *)
         let rec nand = function
           | [x]    -> If(x, then_b, Some else_b)
           | hd::tl -> If(hd, Block [nand tl], Some else_b)
-          | []     -> Block []
+          | []     -> Block []  (* 理论不会到 *)
         in nand ands |> dstmt
       else
       let ors = split_or cond in
       if List.length ors > 1 then
+        (* a || b || c => if a then then_b else if b ... *)
         let rec nor = function
           | [x]    -> If(x, then_b, Some else_b)
           | hd::tl -> If(hd, then_b, Some (nor tl))
           | []     -> Block []
         in nor ors |> dstmt
       else
+        (* 原子条件 *)
         If(cond, dstmt then_b, Some (dstmt else_b))
 
   | If(cond, then_b, None) ->
+      (* 类似处理一个分支的 if *)
       let ands = split_and cond in
       if List.length ands > 1 then
         let rec nand = function
@@ -179,11 +192,13 @@ let rec dstmt = function
         If(cond, dstmt then_b, None)
 
   | While(cond, body) ->
+      (* 把 while(cond) body 变成 if(cond) body; while(cond) body *)
       While(cond, dstmt body)
 
   | Block ss -> Block(List.map dstmt ss)
   | other    -> other
 
+(* 语句翻译，返回 Normal/Returned，支持块作用域、break/continue、return 提前终止 *)
 let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
   match s with
   | Empty -> Normal []
@@ -245,6 +260,7 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
       in
       Normal code
   | While (cond, body) ->
+      (* 循环标签 *)
       let lcond = flabel ()
       and lbody = flabel ()
       and lend = flabel () in
@@ -260,6 +276,7 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
         @ [ IfGoto (cnd, lbody); Goto lend ]
         @ [ Label lbody ] @ bcode @ [ Goto lcond; Label lend ]
       in
+      (* 无法从循环体中直接 return：若想支持可在 body_res 捕获 *)
       Normal code
   | Break -> (
       match ctx.break_lbl with
@@ -270,6 +287,7 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
       | Some lbl -> Normal [ Goto lbl ]
       | None -> failwith "continue used outside loop")
   | Block stmts ->
+      (* 块作用域隔离 *)
       ctx.env_stack := Envs.enter !(ctx.env_stack);
       let rec loop acc = function
         | [] -> Normal acc
@@ -281,6 +299,7 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
       ctx.env_stack := Envs.exit !(ctx.env_stack);
       res
 
+(* 函数转换 *)
 let func_ir (f : func_def) : ir_func =
   let des_body =
     match dstmt (Block f.body) with
@@ -288,42 +307,32 @@ let func_ir (f : func_def) : ir_func =
     | _        -> f.body
   in
   let f' = { f with body = des_body } in
+  (* 初始化 env: 参数映射 *)
   let init_env =
     List.fold_left (fun m x -> Env.add x (Var x) m) Env.empty f'.params
   in
   let ctx0 = { env_stack = ref [init_env]; break_lbl = None; continue_lbl = None } in
+  (* 翻译函数体 *)
   let body_res = stmt_res ctx0 (Block f'.body) in
+  (* 先拿到全部 IR 指令 *)
   let raw_code = flatten body_res in
+  (* 如果末尾恰好是一个孤立 Label，就把它丢掉 *)
   let bodycode =
     match List.rev raw_code with
     | Label _ :: rest_rev -> List.rev rest_rev
     | _ -> raw_code
   in
-  let optimized_code =
-    let final_code =
-      match List.rev bodycode with
-      | Ret (Some ret_val) :: Call (call_dst, fname, call_args) :: rest_rev
-          when fname = f'.func_name && ret_val = call_dst ->
-            let assignments =
-              try
-                List.map2 (fun param_name arg_operand -> Assign (Var param_name, arg_operand)) f'.params call_args
-              with Invalid_argument _ ->
-                failwith ("Compiler error: tail call to " ^ fname ^ " has incorrect number of arguments.")
-            in
-            (List.rev rest_rev) @ assignments @ [Goto "entry"]
-      | _ -> bodycode
-    in
-    [Label "entry"] @ final_code
-  in
-  { name = f'.func_name;
-    args = f'.params;
-    body = optimized_code }
+  { name = f'.func_name; args = f'.params; body = bodycode }
 
+(* 线性IR -> 过程块IR *)
 let pblocks (insts : ir_inst list) : ir_block list =
   let rec split acc curr label labelmap insts =
     match insts with
-    | [] -> List.rev acc
+    | [] -> 
+        List.rev acc
+        (*| _ -> failwith "Basic block must end with a terminator")*)
     | Label l :: rest -> (
+        (* 当前块结束，开启新块 *)
         match curr with
         | [] ->
             let next_label, labelmap' = fIRlabel labelmap l in
@@ -343,6 +352,7 @@ let pblocks (insts : ir_inst list) : ir_block list =
             split acc' [ Label l ] next_label labelmap' rest)
     | Goto l :: rest ->
         let goto_label, labelmap' = fIRlabel labelmap l in
+        (* 刷新一个无意义的 blk, 确保编程者不会出现的 label *)
         let next_label, labelmap'' =
           fIRlabel labelmap' ("__blk" ^ string_of_int !irlabid)
         in
@@ -387,9 +397,11 @@ let pblocks (insts : ir_inst list) : ir_block list =
         split (blk :: acc) [] next_label labelmap' rest
     | inst :: rest -> split acc (inst :: curr) label labelmap rest
   in
+  (* 确保用户不使用 entry 标签 *)
   let entry_label, labelmap = fIRlabel LabelMap.empty "entry" in
   split [] [] entry_label labelmap insts
 
+(* 优化版本的 ir 控制块 *)
 let func_iro (f : func_def) : ir_func_o =
   let init_map =
     List.fold_left
@@ -399,17 +411,18 @@ let func_iro (f : func_def) : ir_func_o =
    let ctx0 = { env_stack = ref [init_map]; break_lbl = None; continue_lbl = None } in
   let bodycode = stmt_res ctx0 (Block f.body) |> flatten in
   let linear_ir =
+    (* 额外处理孤立的 label *)
     match List.rev bodycode with
     | Label _ :: rest_rev -> List.rev rest_rev
     | _ -> bodycode
   in
   let raw_blocks = pblocks linear_ir in
+  (* 构建前驱/后继关系，并剔除空块/重复块 *)
   let cfg_blocks = Cfg.build_cfg raw_blocks in
   let opt_blocks = Cfg.optimize cfg_blocks in
-  { name = f.func_name;
-    args = f.params;
-    blocks = opt_blocks }
+  { name = f.func_name; args = f.params; blocks = opt_blocks }
 
+(* 编译单元转换 *)
 let program_ir (cu : comp_unit) (optimize_flag : bool) : ir_program =
   if optimize_flag then Ir_funcs_o (List.map func_iro cu)
   else Ir_funcs (List.map func_ir cu)
