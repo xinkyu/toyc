@@ -86,15 +86,56 @@ let process_inst env inst =
   | Binop (op, dst, src1, src2) ->
       let src1' = eval_operand env src1 in
       let src2' = eval_operand env src2 in
+      let dst_name = match dst with Var v | Reg v -> v | _ -> "" in
       (match eval_binop op src1' src2' with
-       | Some i -> Assign (dst, Imm i), StringMap.add (match dst with Var v | Reg v -> v | _ -> "") (Some i) env
-       | None -> Binop (op, dst, src1', src2'), StringMap.add (match dst with Var v | Reg v -> v | _ -> "") None env)
+       | Some i -> (* 1. 常量折叠 (已有逻辑) *)
+           Assign (dst, Imm i), StringMap.add dst_name (Some i) env
+       | None -> (* 2. 尝试代数化简 *)
+           (match (op, src1', src2') with
+            (* 恒等规则: x + 0 = x, x - 0 = x, x * 1 = x, x / 1 = x *)
+            | ("+", v, Imm 0) | ("+", Imm 0, v) ->
+                Assign (dst, v), StringMap.add dst_name None env (* 保守更新env *)
+            | ("-", v, Imm 0) ->
+                Assign (dst, v), StringMap.add dst_name None env (* 保守更新env *)
+            | ("*", v, Imm 1) | ("*", Imm 1, v) ->
+                Assign (dst, v), StringMap.add dst_name None env (* 保守更新env *)
+            | ("/", v, Imm 1) ->
+                Assign (dst, v), StringMap.add dst_name None env (* 保守更新env *)
+
+            (* 零规则: x * 0 = 0, x - x = 0 *)
+            | ("-", v1, v2) when v1 = v2 ->
+                Assign (dst, Imm 0), StringMap.add dst_name (Some 0) env
+            | ("*", _, Imm 0) | ("*", Imm 0, _) ->
+                Assign (dst, Imm 0), StringMap.add dst_name (Some 0) env
+
+            (* 强度削减: x * 2 -> x + x,  x * -1 -> -x *)
+            | ("*", v, Imm 2) | ("*", Imm 2, v) ->
+                Binop ("+", dst, v, v), StringMap.add dst_name None env
+            | ("*", v, Imm (-1)) ->
+                Unop ("-", dst, v), StringMap.add dst_name None env
+            | ("*", Imm (-1), v) ->
+                Unop ("-", dst, v), StringMap.add dst_name None env
+            
+            (* 默认: 无法化简，保持原样 *)
+            | _ ->
+                Binop (op, dst, src1', src2'), StringMap.add dst_name None env
+           )
+      )
 
   | Unop (op, dst, src) ->
       let src' = eval_operand env src in
+      let dst_name = match dst with Var v | Reg v -> v | _ -> "" in
       (match eval_unop op src' with
-       | Some i -> Assign (dst, Imm i), StringMap.add (match dst with Var v | Reg v -> v | _ -> "") (Some i) env
-       | None -> Unop (op, dst, src'), StringMap.add (match dst with Var v | Reg v -> v | _ -> "") None env)
+       | Some i -> (* 1. 常量折叠 (已有逻辑) *)
+           Assign (dst, Imm i), StringMap.add dst_name (Some i) env
+       | None -> (* 2. 尝试代数化简 *)
+            (match op with
+             (* 恒等规则: +x = x *)
+             | "+" -> Assign (dst, src'), StringMap.add dst_name None env (* 保守更新env *)
+             (* 默认: 无法化简，保持原样 *)
+             | _   -> Unop (op, dst, src'), StringMap.add dst_name None env
+            )
+      )
 
   | Call (dst, fname, args) ->
       let args' = List.map (eval_operand env) args in
