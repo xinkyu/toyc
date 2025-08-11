@@ -12,7 +12,7 @@ type interval = { var_name: string;
 (* Build live intervals for all variables in a function.
  This version uses the results of the dataflow-based liveness analysis.
 *)
-let build_intervals (func: ir_func_o) : interval list =
+let build_intervals (func: ir_func_o) : interval list * (string, int) Hashtbl.t =
   let _, live_out = Liveness.analyze func in
   let usage_map = ref VarMap.empty in
   let inst_num = ref 0 in
@@ -46,7 +46,7 @@ let build_intervals (func: ir_func_o) : interval list =
   ) func.blocks;
 
   (* 2. For each variable, create an interval from its min to max usage point *)
-  VarMap.fold (fun var uses acc ->
+  let intervals = VarMap.fold (fun var uses acc ->
     if uses = [] then acc
     else
       let sorted_uses = List.sort_uniq compare uses in
@@ -56,8 +56,8 @@ let build_intervals (func: ir_func_o) : interval list =
         finish = List.hd (List.rev sorted_uses);
       } in
       new_interval :: acc
-  ) !usage_map [],
-  usage_count
+  ) !usage_map [] in
+  (intervals, usage_count)
 
 type allocation_result =
   | PhysicalRegister of string
@@ -69,8 +69,8 @@ type allocation_result =
    t3, t4 are reserved for saving operands during binary operations. *)
 let available_registers = ["t0"; "t1"; "t2"]
 
-let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t * int =
-  let intervals, usage_count = intervals in
+let allocate (intervals_and_usage: interval list * (string, int) Hashtbl.t) : (string, allocation_result) Hashtbl.t * int =
+  let (intervals, usage_count) = intervals_and_usage in
   (* The final mapping from variable name to its location *)
   let allocation_map = Hashtbl.create (List.length intervals) in
 

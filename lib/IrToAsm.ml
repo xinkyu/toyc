@@ -102,82 +102,42 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
           | "t3" | "t4" | "t5" -> false
           | _ -> true
         ) (get_live_physical_registers allocation_map) in
-      List.iteri (fun i reg ->
-        emit_asm (Printf.sprintf "  sw %s, %d(sp)" reg (-4 * (i + 1)))
-      ) live_regs;
+      let save_regs = 
+        List.mapi (fun i reg ->
+          Printf.sprintf "\tsw %s, %d(sp)\n" reg (-4 * (i + 1))
+        ) live_regs
+        |> String.concat "" in
   
       (* Set up function arguments *)
-      List.iteri (fun i arg ->
-        if i < 8 then
-          (* First 8 arguments go in a0-a7 *)
-          let arg_reg = match arg with
-            | Var v -> (match Hashtbl.find allocation_map v with
-                | PhysicalRegister r -> r
-                | StackSlot offset -> 
-                    emit_asm (Printf.sprintf "  lw t3, %d(s0)" (-offset));
-                    "t3")
-            | Imm i -> 
-                emit_asm (Printf.sprintf "  li t3, %d" i);
-                "t3" in
-          (match op with
-          | Neg -> emit_asm (Printf.sprintf "  neg t5, %s" src_reg)
-          | Not -> 
-              emit_asm (Printf.sprintf "  seqz t5, %s" src_reg));
-          "t5"
-          
-          | Assign (dst, src) ->
-              let src_reg = match src with
-                | Var v -> (match Hashtbl.find allocation_map v with
-                    | PhysicalRegister r -> r
-                    | StackSlot offset -> 
-                        emit_asm (Printf.sprintf "  lw t3, %d(s0)" (-offset));
-                        "t3")
-                | Imm i -> 
-                    emit_asm (Printf.sprintf "  li t3, %d" i);
-                    "t3" in
-              let dst_loc = Hashtbl.find allocation_map dst in
-              (match dst_loc with
-              | PhysicalRegister reg ->
-                  if reg <> src_reg then
-                    emit_asm (Printf.sprintf "  mv %s, %s" reg src_reg)
-              | StackSlot offset ->
-                  emit_asm (Printf.sprintf "  sw %s, %d(s0)" src_reg (-offset)));
-              src_reg
-          emit_asm (Printf.sprintf "  mv a%d, %s" i arg_reg)
-        else
-          (* Remaining arguments go on stack *)
-          let arg_reg = match arg with
-            | Var v -> (match Hashtbl.find allocation_map v with
-                | PhysicalRegister r -> r
-                | StackSlot offset -> 
-                    emit_asm (Printf.sprintf "  lw t3, %d(s0)" (-offset));
-                    "t3")
-            | Imm i -> 
-                emit_asm (Printf.sprintf "  li t3, %d" i);
-                "t3" in
-          emit_asm (Printf.sprintf "  sw %s, %d(sp)" arg_reg (4 * (i - 8)))
-      ) args;
+      let args_code = 
+        List.mapi (fun i arg ->
+          if i < 8 then
+            (* First 8 arguments go in a0-a7 *)
+            let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t3" arg in
+            code1 ^ Printf.sprintf "\tmv a%d, %s\n" i reg1
+          else
+            (* Remaining arguments go on stack *)
+            let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t3" arg in
+            code1 ^ Printf.sprintf "\tsw %s, %d(sp)\n" reg1 (4 * (i - 8))
+        ) args
+        |> String.concat "" in
   
       (* Make the call *)
-      emit_asm (Printf.sprintf "  call %s" func_name);
+      let call_code = Printf.sprintf "\tcall %s\n" func_name in
   
       (* Restore saved registers *)
-      List.iteri (fun i reg ->
-        emit_asm (Printf.sprintf "  lw %s, %d(sp)" reg (-4 * (i + 1)))
-      ) (List.rev live_regs);
+      let restore_regs = 
+        List.mapi (fun i reg ->
+          Printf.sprintf "\tlw %s, %d(sp)\n" reg (-4 * (i + 1))
+        ) (List.rev live_regs)
+        |> String.concat "" in
   
       (* Move return value if needed *)
-      (match dst with
-      | Some dst_var ->
-          let dst_loc = Hashtbl.find allocation_map dst_var in
-          (match dst_loc with
-          | PhysicalRegister reg ->
-              if reg <> "a0" then
-                emit_asm (Printf.sprintf "  mv %s, a0" reg)
-          | StackSlot offset ->
-              emit_asm (Printf.sprintf "  sw a0, %d(s0)" (-offset)))
-      | None -> ());
-      "a0"
+      let store_result = match dst with
+        | Some dst_var -> store_operand allocation_map spill_base_offset "a0" (Var dst_var)
+        | None -> "" in
+  
+      save_regs ^ args_code ^ call_code ^ restore_regs ^ store_result
   | Ret (Some op) ->
       let load_code = load_operand allocation_map spill_base_offset "a0" op in
       load_code ^ Printf.sprintf "\tj %s\n" epilogue_label
@@ -194,8 +154,8 @@ let com_block_o (blk : ir_block) allocation_map spill_base_offset caller_save_ba
   (blk.insts |> List.map (fun i -> com_inst_o i allocation_map spill_base_offset caller_save_base epilogue_label) |> String.concat "")
 
 let com_func_o (f : ir_func_o) : string =
-  let intervals = LinearScan.build_intervals f in
-  let allocation_map, num_spills = LinearScan.allocate intervals in
+  let intervals_and_usage = LinearScan.build_intervals f in
+  let allocation_map, num_spills = LinearScan.allocate intervals_and_usage in
 
   (* Pre-scan for max outgoing stack arguments to reserve space *)
   let max_outgoing_stack_args = List.fold_left (fun current_max block ->
