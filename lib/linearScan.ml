@@ -62,8 +62,7 @@ type allocation_result =
 (* RISC-V calling convention: t0-t6 are caller-saved temporaries.
    We can use them freely within a function.
    t5, t6 are reserved for temporary values during instruction translation. *)
-(* 增加可用的临时寄存器数量 *)
-let available_registers = ["t0"; "t1"; "t2"; "t3"; "t4"; "t5"; "t6"]
+let available_registers = ["t0"; "t1"; "t2"; "t3"; "t4"]
 
 let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t * int =
   (* The final mapping from variable name to its location *)
