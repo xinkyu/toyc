@@ -110,7 +110,6 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
       | _ ->
           let res = ftemp () in
           (res, code @ [ Unop (string_unop op, res, operand) ]))
-  
   | Binop (op, e1, e2) -> (
       let lhs, c1 = expr_ir ctx e1 in
       let rhs, c2 = expr_ir ctx e2 in
@@ -322,7 +321,18 @@ let func_ir (f : func_def) : ir_func =
     | Label _ :: rest_rev -> List.rev rest_rev
     | _ -> raw_code
   in
-  { name = f'.func_name; args = f'.params; body = bodycode }
+  (* 尾递归优化：将尾递归调用转换为循环 *)
+  let optimized_code = 
+    let rec optimize_tail_calls code =
+      match List.rev code with
+      | Call(ret, fname, args) :: rest when fname = f'.func_name ->
+          (* 是尾递归调用 *)
+          List.rev rest @ optimize_tail_call f'.params args
+      | _ -> code
+    in
+    [Label "entry"] @ optimize_tail_calls bodycode
+  in
+  { name = f'.func_name; args = f'.params; body = optimized_code }
 
 (* 线性IR -> 过程块IR *)
 let pblocks (insts : ir_inst list) : ir_block list =
@@ -330,7 +340,301 @@ let pblocks (insts : ir_inst list) : ir_block list =
     match insts with
     | [] -> 
         List.rev acc
-        (*| _ -> failwith "Basic block must end with a terminator")*)
+    | Label l :: rest -> (
+        (* 当前块结束，开启新块 *)
+        match curr with
+        | [] ->
+            let next_label, labelmap' = fIRlabel labelmap l in
+            split acc [ Label l ] next_label labelmap' rest
+        | _ ->
+            let next_label, labelmap' = fIRlabel labelmap l in
+            let blk =
+              {
+                label;
+                insts = List.rev curr;
+                terminator = TermSeq next_label;
+                preds = [];
+                succs = [];
+              }
+            in
+            let acc' = blk :: acc in
+            split acc' [ Label l ] next_label labelmap' rest)
+    | Goto l :: rest ->
+        let goto_label, labelmap' = fIRlabel labelmap l in
+        (* 刷新一个无意义的 blk, 确保编程者不会出现的 label *)
+        let next_label, labelmap'' =
+          fIRlabel labelmap' ("__blk" ^ string_of_int !irlabid)
+        in
+        let blk =
+          {
+            label;
+            insts = List.rev (Goto l :: curr);
+            terminator = TermGoto goto_label;
+            preds = [];
+            succs = [];
+          }
+        in
+        split (blk :: acc) [] next_label labelmap'' rest
+    | IfGoto (cond, l) :: rest ->
+        let then_label, labelmap' = fIRlabel labelmap l in
+        let else_label, labelmap'' =
+          fIRlabel labelmap' ("__else" ^ string_of_int !irlabid)
+        in
+        let blk =
+          {
+            label;
+            insts = List.rev (IfGoto (cond, l) :: curr);
+            terminator = TermIf (cond, then_label, else_label);
+            preds = [];
+            succs = [];
+          }
+        in
+        split (blk :: acc) [] else_label labelmap'' rest
+    | Ret op :: rest ->
+        let next_label, labelmap' =
+          fIRlabel labelmap ("__ret" ^ string_of_int !irlabid)
+        in
+        let blk =
+          {
+            label;
+            insts = List.rev (Ret op :: curr);
+            terminator = TermRet op;
+            preds = [];
+            succs = [];
+          }
+        in
+        split (blk :: acc) [] next_label labelmap' rest
+    | inst :: rest -> split acc (inst :: curr) label labelmap rest
+  in
+  (* 确保用户不使用 entry 标签 *)
+  let entry_label, labelmap = fIRlabel LabelMap.empty "entry" in
+  split [] [] entry_label labelmap insts
+
+(* 优化版本的 ir 控制块 *)
+let func_iro (f : func_def) : ir_func_o =
+  let init_map =
+    List.fold_left
+      (fun m name -> Env.add name (Var name) m)
+      Env.empty f.params
+  in
+   let ctx0 = { env_stack = ref [init_map]; break_lbl = None; continue_lbl = None } in
+  let bodycode = stmt_res ctx0 (Block f.body) |> flatten in
+  let linear_ir =
+    (* 额外处理孤立的 label *)
+    match List.rev bodycode with
+    | Label _ :: rest_rev -> List.rev rest_rev
+    | _ -> bodycode
+  in
+  let raw_blocks = pblocks linear_ir in
+  (* 构建前驱/后继关系，并剔除空块/重复块 *)
+  let cfg_blocks = Cfg.build_cfg raw_blocks in
+  let opt_blocks = Cfg.optimize cfg_blocks in
+  { name = f.func_name; args = f.params; blocks = opt_blocks }
+
+(* 编译单元转换 *)
+let program_ir (cu : comp_unit) (optimize_flag : bool) : ir_program =
+  if optimize_flag then Ir_funcs_o (List.map func_iro cu)
+  else Ir_funcs (List.map func_ir cu)
+
+(* 检查是否是尾递归调用 *)
+let is_tail_call fname = function
+  | Call (_, f, _) -> f = fname
+  | _ -> false
+
+(* 将尾递归调用转换为循环 *)
+let optimize_tail_call fname args call_args =
+  (* 生成参数赋值指令 *)
+  let assign_args = 
+    List.map2 (fun arg value -> 
+      match arg with 
+      | Var name | Reg name -> Assign(Var name, value)
+      | _ -> failwith "Invalid argument"
+    ) args call_args
+  in
+  assign_args @ [Goto "entry"]
+
+let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
+  match e with
+  | Number n -> (Imm n, [])
+  | ID name ->
+      let operand = Envs.lookup name !(ctx.env_stack) in
+      (operand, [])
+  | Unop (op, e1) -> (
+      let operand, code = expr_ir ctx e1 in
+      match operand with
+      | Imm n ->
+          let folded =
+            match op with
+            | Plus -> Imm n (* +n = n *)
+            | Minus -> Imm (-n) (* -n *)
+            | Not -> Imm (if n = 0 then 1 else 0)
+            (* !n *)
+          in
+          (folded, code)
+      | _ ->
+          let res = ftemp () in
+          (res, code @ [ Unop (string_unop op, res, operand) ]))
+  | Binop (op, e1, e2) -> (
+      let lhs, c1 = expr_ir ctx e1 in
+      let rhs, c2 = expr_ir ctx e2 in
+      match (lhs, rhs) with
+      | Imm a, Imm b ->
+          let folded =
+            match op with
+            | Add -> Imm (a + b)
+            | Sub -> Imm (a - b)
+            | Mul -> Imm (a * b)
+            | Div -> Imm (a / b)
+            | Mod -> Imm (a mod b)
+            | Eq -> Imm (if a = b then 1 else 0)
+            | Neq -> Imm (if a <> b then 1 else 0)
+            | Less -> Imm (if a < b then 1 else 0)
+            | Leq -> Imm (if a <= b then 1 else 0)
+            | Greater -> Imm (if a > b then 1 else 0)
+            | Geq -> Imm (if a >= b then 1 else 0)
+            | Lor | Land -> failwith "Never touched"
+          in
+          (folded, c1 @ c2)
+      | _ ->
+          let dst = ftemp () in
+          (dst, c1 @ c2 @ [ Binop (string_binop op, dst, lhs, rhs) ]))
+  | Call (f, args) ->
+      (* 参数顺序按出现顺序计算 *)
+      let codes, oprs =
+        List.fold_left
+          (fun (acc_code, acc_opr) arg ->
+            let opr, code = expr_ir ctx arg in
+            (acc_code @ code, acc_opr @ [ opr ]))
+          ([], []) args
+      in
+      let ret = ftemp () in
+      (ret, codes @ [ Call (ret, f, oprs) ])
+
+let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
+  match s with
+  | Return None -> Returned [ Ret None ]
+  | Return (Some e) ->
+      let operand, code = expr_ir ctx e in
+      Returned (code @ [ Ret (Some operand) ])
+  | Expr e ->
+      let _, code = expr_ir ctx e in
+      Normal code
+  | Decl (name, None) ->
+      ctx.env_stack := Envs.bind name (Var name) !(ctx.env_stack);
+      Normal []
+  | Decl (name, Some e) ->
+      let operand, code = expr_ir ctx e in
+      ctx.env_stack := Envs.bind name (Var name) !(ctx.env_stack);
+      Normal (code @ [ Assign (Var name, operand) ])
+  | If (cond, tstmt, Some estmt) ->
+      let cnd, cc = expr_ir ctx cond in
+      let lthen = flabel () and lelse = flabel () and lend = flabel () in
+      let then_res = stmt_res ctx tstmt in
+      let else_res = stmt_res ctx estmt in
+      let then_code = flatten then_res in
+      let else_code = flatten else_res in
+      let code =
+        cc
+        @ [ IfGoto (cnd, lthen); Goto lelse ]
+        @ [ Label lthen ] @ then_code @ [ Label lelse ] @ else_code
+        @ [ Label lend ]
+      in
+      match (then_res, else_res) with
+      | Returned _, _ | _, Returned _ -> Returned code
+      | _ -> Normal code
+  | If (cond, tstmt, None) ->
+      let cnd, cc = expr_ir ctx cond in
+      let lthen = flabel () and lskip = flabel () in
+      let then_res = stmt_res ctx tstmt in
+      let then_code = flatten then_res in
+      let code =
+        cc
+        @ [ IfGoto (cnd, lthen); Goto lskip ]
+        @ [ Label lthen ] @ then_code @ [ Label lskip ]
+      in
+      Normal code
+  | While (cond, body) ->
+      (* 循环标签 *)
+      let lcond = flabel ()
+      and lbody = flabel ()
+      and lend = flabel () in
+      let ctx_loop =
+        { ctx with break_lbl = Some lend; continue_lbl = Some lcond }
+      in
+      let cnd, ccode = expr_ir ctx_loop cond in
+      let body_res = stmt_res ctx_loop body in
+      let bcode = flatten body_res in
+      let code =
+        [ Goto lcond; Label lcond ]
+        @ ccode
+        @ [ IfGoto (cnd, lbody); Goto lend ]
+        @ [ Label lbody ] @ bcode @ [ Goto lcond; Label lend ]
+      in
+      (* 无法从循环体中直接 return：若想支持可在 body_res 捕获 *)
+      Normal code
+  | Break -> (
+      match ctx.break_lbl with
+      | Some lbl -> Normal [ Goto lbl ]
+      | None -> failwith "break used outside loop")
+  | Continue -> (
+      match ctx.continue_lbl with
+      | Some lbl -> Normal [ Goto lbl ]
+      | None -> failwith "continue used outside loop")
+  | Block stmts ->
+      (* 块作用域隔离 *)
+      ctx.env_stack := Envs.enter !(ctx.env_stack);
+      let rec loop acc = function
+        | [] -> Normal acc
+        | hd::tl -> (match stmt_res ctx hd with
+            | Returned c -> Returned (acc @ c)
+            | Normal c -> loop (acc @ c) tl)
+      in
+      let res = loop [] stmts in
+      ctx.env_stack := Envs.exit !(ctx.env_stack);
+      res
+
+(* 函数转换 *)
+let func_ir (f : func_def) : ir_func =
+  let des_body =
+    match dstmt (Block f.body) with
+    | Block ss -> ss
+    | _        -> f.body
+  in
+  let f' = { f with body = des_body } in
+  (* 初始化 env: 参数映射 *)
+  let init_env =
+    List.fold_left (fun m x -> Env.add x (Var x) m) Env.empty f'.params
+  in
+  let ctx0 = { env_stack = ref [init_env]; break_lbl = None; continue_lbl = None } in
+  (* 翻译函数体 *)
+  let body_res = stmt_res ctx0 (Block f'.body) in
+  (* 先拿到全部 IR 指令 *)
+  let raw_code = flatten body_res in
+  (* 如果末尾恰好是一个孤立 Label，就把它丢掉 *)
+  let bodycode =
+    match List.rev raw_code with
+    | Label _ :: rest_rev -> List.rev rest_rev
+    | _ -> raw_code
+  in
+  (* 尾递归优化：将尾递归调用转换为循环 *)
+  let optimized_code = 
+    let rec optimize_tail_calls code =
+      match List.rev code with
+      | Call(ret, fname, args) :: rest when fname = f'.func_name ->
+          (* 是尾递归调用 *)
+          List.rev rest @ optimize_tail_call f'.params args
+      | _ -> code
+    in
+    [Label "entry"] @ optimize_tail_calls bodycode
+  in
+  { name = f'.func_name; args = f'.params; body = optimized_code }
+
+(* 线性IR -> 过程块IR *)
+let pblocks (insts : ir_inst list) : ir_block list =
+  let rec split acc curr label labelmap insts =
+    match insts with
+    | [] -> 
+        List.rev acc
     | Label l :: rest -> (
         (* 当前块结束，开启新块 *)
         match curr with
