@@ -110,12 +110,18 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
           let res = ftemp () in
           (res, code @ [ Unop (string_unop op, res, operand) ]))
   
+  (* astToIR.ml *)
+let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
+  match e with
+  (* ... other cases ... *)
   | Binop (op, e1, e2) -> (
       let lhs, c1 = expr_ir ctx e1 in
       let rhs, c2 = expr_ir ctx e2 in
-      match (lhs, rhs) with
-      | Imm a, Imm b ->
-          let folded =
+      let code = c1 @ c2 in
+      match (op, lhs, rhs) with
+      (* 优先进行常量折叠 *)
+      | (_, Imm a, Imm b) ->
+          let folded = (
             match op with
             | Add -> Imm (a + b)
             | Sub -> Imm (a - b)
@@ -128,12 +134,26 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
             | Leq -> Imm (if a <= b then 1 else 0)
             | Greater -> Imm (if a > b then 1 else 0)
             | Geq -> Imm (if a >= b then 1 else 0)
-            | Lor | Land -> failwith "Never touched"
-          in
-          (folded, c1 @ c2)
+            | Lor | Land -> failwith "Logical ops should have been handled by dstmt"
+          ) in (folded, code)
+      
+      (* 新增：在生成指令前进行代数化简 *)
+      (* 恒等规则: x + 0 -> x, x - 0 -> x, x * 1 -> x, etc. *)
+      | (Add, v, Imm 0) | (Add, Imm 0, v) -> (v, code)
+      | (Sub, v, Imm 0) -> (v, code)
+      | (Mul, v, Imm 1) | (Mul, Imm 1, v) -> (v, code)
+      | (Div, v, Imm 1) -> (v, code)
+      
+      (* 零规则 & 自反规则: x * 0 -> 0, x - x -> 0 *)
+      | (Mul, _, Imm 0) | (Mul, Imm 0, _) -> (Imm 0, code)
+      | (Sub, v1, v2) when v1 = v2 -> (Imm 0, code)
+      
+      (* 默认情况：无法化简，生成新指令 *)
       | _ ->
           let dst = ftemp () in
-          (dst, c1 @ c2 @ [ Binop (string_binop op, dst, lhs, rhs) ]))
+          (dst, code @ [ Binop (string_binop op, dst, lhs, rhs) ])
+    )
+  (* ... other cases ... *)
   | Call (f, args) ->
       (* 参数顺序按出现顺序计算 *)
       let codes, oprs =
