@@ -16,11 +16,14 @@ let build_intervals (func: ir_func_o) : interval list =
   let _, live_out = Liveness.analyze func in
   let usage_map = ref VarMap.empty in
   let inst_num = ref 0 in
+  let usage_count = Hashtbl.create 100 in
 
   (* Helper to record a use or def of a variable at a specific instruction number *)
   let add_usage var pos =
     let current_uses = try VarMap.find var !usage_map with Not_found -> [] in
-    usage_map := VarMap.add var (pos :: current_uses) !usage_map
+    usage_map := VarMap.add var (pos :: current_uses) !usage_map;
+    let count = try Hashtbl.find usage_count var with Not_found -> 0 in
+    Hashtbl.replace usage_count var (count + 1)
   in
 
   (* 1. For each instruction, find all variables that are live *)
@@ -53,7 +56,8 @@ let build_intervals (func: ir_func_o) : interval list =
         finish = List.hd (List.rev sorted_uses);
       } in
       new_interval :: acc
-  ) !usage_map []
+  ) !usage_map [],
+  usage_count
 
 type allocation_result =
   | PhysicalRegister of string
@@ -66,6 +70,7 @@ type allocation_result =
 let available_registers = ["t0"; "t1"; "t2"]
 
 let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t * int =
+  let intervals, usage_count = intervals in
   (* The final mapping from variable name to its location *)
   let allocation_map = Hashtbl.create (List.length intervals) in
 
@@ -103,15 +108,16 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
       Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
       active := List.sort (fun a b -> compare a.finish b.finish) (current_interval :: !active);
     end else begin
-      (* No free registers, find the interval that ends furthest in the future *)
+      (* No free registers, find the best candidate to spill based on usage count and lifetime *)
       let spill_candidate = ref current_interval in
-      let max_finish = ref current_interval.finish in
+      let min_score = ref (try Hashtbl.find usage_count current_interval.var_name with Not_found -> 0) in
       List.iter (fun (active_interval:interval) ->
         match Hashtbl.find allocation_map active_interval.var_name with
         | PhysicalRegister _ ->
-            if active_interval.finish > !max_finish then begin
+            let score = try Hashtbl.find usage_count active_interval.var_name with Not_found -> 0 in
+            if score < !min_score then begin
               spill_candidate := active_interval;
-              max_finish := active_interval.finish
+              min_score := score
             end
         | StackSlot _ -> ()
       ) !active;
