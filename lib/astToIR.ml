@@ -111,50 +111,6 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
           let res = ftemp () in
           (res, code @ [ Unop (string_unop op, res, operand) ]))
   
-  | Binop (Land, e1, e2) ->
-      let res = ftemp() in
-      let l_rhs = flabel() in
-      let l_end = flabel() in
-      let v1, c1 = expr_ir ctx e1 in
-      let code = c1 @ [
-          IfGoto(v1, l_rhs);      (* If e1 is non-zero, check e2 *)
-          Assign(res, Imm(0));    (* Else, result is 0 *)
-          Goto(l_end);
-          Label(l_rhs);
-      ] in
-      let v2, c2 = expr_ir ctx e2 in
-      let temp_bool = ftemp() in
-      let code = code @ c2 @ [
-          Binop("!=", temp_bool, v2, Imm(0)); (* Convert v2 to boolean 0 or 1 *)
-          Assign(res, temp_bool);
-          Label(l_end);
-      ] in
-      (res, code)
-
-  | Binop (Lor, e1, e2) ->
-      let res = ftemp() in
-      let l_rhs = flabel() in
-      let l_true = flabel() in
-      let l_end = flabel() in
-      let v1, c1 = expr_ir ctx e1 in
-      let code = c1 @ [
-          IfGoto(v1, l_true);      (* If e1 is non-zero, result is 1 *)
-          Goto(l_rhs);             (* Else, check e2 *)
-      ] in
-      let v2, c2 = expr_ir ctx e2 in
-      let temp_bool = ftemp() in
-      let code = code @ c2 @ [
-          Label(l_rhs);
-          Binop("!=", temp_bool, v2, Imm(0)); (* Convert v2 to boolean *)
-          Assign(res, temp_bool);
-          Goto(l_end);
-
-          Label(l_true);
-          Assign(res, Imm(1));
-          Label(l_end);
-      ] in
-      (res, code)
-
   | Binop (op, e1, e2) -> (
       let lhs, c1 = expr_ir ctx e1 in
       let rhs, c2 = expr_ir ctx e2 in
@@ -289,7 +245,9 @@ let rec stmt_res (ctx : context) (s : stmt) : stmt_res =
         @ [ Label lthen ] @ then_code @ [ Label lelse ] @ else_code
         @ [ Label lend ]
       in
-      Normal code)
+      match (then_res, else_res) with
+      | Returned _, _ | _, Returned _ -> Returned code
+      | _ -> Normal code)
   | If (cond, tstmt, None) ->
       let cnd, cc = expr_ir ctx cond in
       let lthen = flabel () and lskip = flabel () in
@@ -364,14 +322,7 @@ let func_ir (f : func_def) : ir_func =
     | Label _ :: rest_rev -> List.rev rest_rev
     | _ -> raw_code
   in
-  (* Add a default return 0 for main if it falls off the end *)
-  let final_bodycode =
-    if f'.func_name = "main" && not (ends bodycode) then
-      bodycode @ [Ret (Some (Imm 0))]
-    else
-      bodycode
-  in
-  { name = f'.func_name; args = f'.params; body = final_bodycode }
+  { name = f'.func_name; args = f'.params; body = bodycode }
 
 (* 线性IR -> 过程块IR *)
 let pblocks (insts : ir_inst list) : ir_block list =
