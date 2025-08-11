@@ -52,52 +52,55 @@ let store_operand allocation_map spill_base_offset source_reg dst =
 let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_base epilogue_label : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
-      (* First ensure lhs is in a register *)
+      (* First ensure lhs is in a register and save its value *)
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" lhs in
-      (* Then ensure rhs is in a different register *)
+      let save_lhs = Printf.sprintf "\tmv t3, %s\n" reg1 in
+      (* Then ensure rhs is in a different register and save its value *)
       let code2, reg2 = ensure_in_reg allocation_map spill_base_offset "t6" rhs in
+      let save_rhs = Printf.sprintf "\tmv t4, %s\n" reg2 in
       let op_code =
         match op with
-        | "+" -> Printf.sprintf "\tadd t5, %s, %s\n" reg1 reg2
-        | "-" -> Printf.sprintf "\tsub t5, %s, %s\n" reg1 reg2
-        | "*" -> Printf.sprintf "\tmul t5, %s, %s\n" reg1 reg2
-        | "/" -> Printf.sprintf "\tdiv t5, %s, %s\n" reg1 reg2
-        | "%" -> Printf.sprintf "\trem t5, %s, %s\n" reg1 reg2
-        | "==" -> Printf.sprintf "\tsub t5, %s, %s\n\tseqz t5, t5\n" reg1 reg2
-        | "!=" -> Printf.sprintf "\tsub t5, %s, %s\n\tsnez t5, t5\n" reg1 reg2
-        | "<=" -> Printf.sprintf "\tsgt t5, %s, %s\n\txori t5, t5, 1\n" reg1 reg2
-        | ">=" -> Printf.sprintf "\tslt t5, %s, %s\n\txori t5, t5, 1\n" reg1 reg2
-        | "<" -> Printf.sprintf "\tslt t5, %s, %s\n" reg1 reg2
-        | ">" -> Printf.sprintf "\tsgt t5, %s, %s\n" reg1 reg2
-        | "&&" -> Printf.sprintf "\tand t5, %s, %s\n" reg1 reg2
-        | "||" -> Printf.sprintf "\tor t5, %s, %s\n" reg1 reg2
+        | "+" -> Printf.sprintf "\tadd t5, t3, t4\n"
+        | "-" -> Printf.sprintf "\tsub t5, t3, t4\n"
+        | "*" -> Printf.sprintf "\tmul t5, t3, t4\n"
+        | "/" -> Printf.sprintf "\tdiv t5, t3, t4\n"
+        | "%" -> Printf.sprintf "\trem t5, t3, t4\n"
+        | "==" -> Printf.sprintf "\tsub t5, t3, t4\n\tseqz t5, t5\n"
+        | "!=" -> Printf.sprintf "\tsub t5, t3, t4\n\tsnez t5, t5\n"
+        | "<=" -> Printf.sprintf "\tsgt t5, t3, t4\n\txori t5, t5, 1\n"
+        | ">=" -> Printf.sprintf "\tslt t5, t3, t4\n\txori t5, t5, 1\n"
+        | "<" -> Printf.sprintf "\tslt t5, t3, t4\n"
+        | ">" -> Printf.sprintf "\tsgt t5, t3, t4\n"
+        | "&&" -> Printf.sprintf "\tand t5, t3, t4\n"
+        | "||" -> Printf.sprintf "\tor t5, t3, t4\n"
         | _ -> failwith ("Unknown binop: " ^ op)
       in
       let store_code = store_operand allocation_map spill_base_offset "t5" dst in
-      code1 ^ code2 ^ op_code ^ store_code
+      code1 ^ save_lhs ^ code2 ^ save_rhs ^ op_code ^ store_code
   | Unop (op, dst, src) ->
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" src in
+      let save_src = Printf.sprintf "\tmv t3, %s\n" reg1 in
       let op_code =
         match op with
-        | "-" -> Printf.sprintf "\tneg t5, %s\n" reg1
-        | "!" -> Printf.sprintf "\tseqz t5, %s\n" reg1
-        | "+" -> ""
+        | "-" -> Printf.sprintf "\tneg t5, t3\n"
+        | "!" -> Printf.sprintf "\tseqz t5, t3\n"
+        | "+" -> Printf.sprintf "\tmv t5, t3\n"
         | _ -> failwith ("Unknown unop: " ^ op)
       in
-      let effective_reg = if op = "+" then reg1 else "t5" in
-      let store_code = store_operand allocation_map spill_base_offset effective_reg dst in
-      code1 ^ op_code ^ store_code
+      let store_code = store_operand allocation_map spill_base_offset "t5" dst in
+      code1 ^ save_src ^ op_code ^ store_code
   | Assign (dst, src) ->
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" src in
-      let store_code = store_operand allocation_map spill_base_offset reg1 dst in
-      code1 ^ store_code
+      let save_src = Printf.sprintf "\tmv t3, %s\n" reg1 in
+      let store_code = store_operand allocation_map spill_base_offset "t3" dst in
+      code1 ^ save_src ^ store_code
   | Call (dst, fname, args) ->
       (* 1. Identify which physical registers are currently active and need saving *)
       let active_phys_regs =
         Hashtbl.fold (fun _ alloc acc ->
           match alloc with
           | PhysicalRegister r -> 
-              if List.mem r available_registers || r = "t5" || r = "t6" then r :: acc 
+              if List.mem r available_registers || r = "t3" || r = "t4" || r = "t5" || r = "t6" then r :: acc 
               else acc
           | StackSlot _ -> acc
         ) allocation_map []
