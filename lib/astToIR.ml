@@ -110,10 +110,6 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
           let res = ftemp () in
           (res, code @ [ Unop (string_unop op, res, operand) ]))
   
-  (* astToIR.ml *)
-let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
-  match e with
-  (* ... other cases ... *)
   | Binop (op, e1, e2) -> (
       let lhs, c1 = expr_ir ctx e1 in
       let rhs, c2 = expr_ir ctx e2 in
