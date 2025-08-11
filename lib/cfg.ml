@@ -255,19 +255,36 @@ let tail_recursion_optimization (func : ir_func_o) : ir_func_o =
   let current_func_name = func.name in
   let params = func.args in
   let modified = ref false in
-  List.iter (fun block ->
+ 
+List.iter (fun block ->
     match block.terminator with
     | TermRet (Some ret_val) -> (
         match List.rev block.insts with
-        | Call (dst, fname, args) :: rest_rev ->
-            if fname = current_func_name && dst = ret_val && List.length params = List.length args then
-            begin
-              let insts_without_call = List.rev rest_rev in
-              let assignments = List.map2 (fun p a -> Assign (Var p, a)) params args in
-              block.insts <- insts_without_call @ assignments;
-              block.terminator <- TermGoto entry_label;
-              modified := true
-            end
+        
+        (* 新增模式: 识别 "t = f(...); return t;" 的情况 *)
+        (* 检查最后一条指令是否为 Assign(ret_val, call_dst) *)
+        | Assign(dst_assign, src_assign) :: Call(dst_call, fname, args) :: rest_rev
+          when dst_assign = ret_val && src_assign = dst_call && fname = current_func_name && List.length params = List.length args ->
+            
+            (* 这是尾递归! `ret_val` 是 `dst_assign`，它被赋予了 `src_assign` 的值, *)
+            (* 而 `src_assign` 正是来自 `dst_call` (f的返回值) *)
+            
+            let insts_without_call_and_assign = List.rev rest_rev in
+            let assignments = List.map2 (fun p a -> Assign (Var p, a)) params args in
+            block.insts <- insts_without_call_and_assign @ assignments;
+            block.terminator <- TermGoto entry_label;
+            modified := true
+
+        (* 原有模式: 识别 "return f(...);" 的情况 *)
+        | Call (dst, fname, args) :: rest_rev
+          when fname = current_func_name && dst = ret_val && List.length params = List.length args ->
+
+            let insts_without_call = List.rev rest_rev in
+            let assignments = List.map2 (fun p a -> Assign (Var p, a)) params args in
+            block.insts <- insts_without_call @ assignments;
+            block.terminator <- TermGoto entry_label;
+            modified := true
+            
         | _ -> ()
       )
     | _ -> ()
