@@ -214,7 +214,7 @@ let com_func_o (f : ir_func_o) : string =
 (* Original Non-Optimized Code Generation (Spill-Everything) *)
 (*******************************************************************)
 
-let com_func_non_opt (f : ir_func) : string =
+let rec com_func_non_opt (f : ir_func) : string =
   let v_env = Hashtbl.create 1600 in
   let stack_offset = ref 0 in
   let get_sto var = try Hashtbl.find v_env var with Not_found -> failwith ("Unknown variable: " ^ var) in
@@ -231,49 +231,9 @@ let com_func_non_opt (f : ir_func) : string =
     | Imm i -> Printf.sprintf "\tli %s, %d\n" reg i
     | Reg r | Var r -> Printf.sprintf "\tlw %s, %d(sp)\n" reg (get_sto r)
   in
-  let com_inst_non_opt (inst : ir_inst) : string =
+  let rec com_inst_non_opt (inst : ir_inst) : string =
     match inst with
     | Binop (op, dst, lhs, rhs) ->
-        let lhs_reg = match lhs with
-          | Var v -> (match Hashtbl.find allocation_map v with
-              | PhysicalRegister r -> r
-              | StackSlot offset -> 
-                  emit_asm (Printf.sprintf "  lw t3, %d(s0)" (-offset));
-                  "t3")
-          | Imm i -> 
-              emit_asm (Printf.sprintf "  li t3, %d" i);
-              "t3" in
-        let rhs_reg = match rhs with
-          | Var v -> (match Hashtbl.find allocation_map v with
-              | PhysicalRegister r -> r
-              | StackSlot offset -> 
-                  emit_asm (Printf.sprintf "  lw t4, %d(s0)" (-offset));
-                  "t4")
-          | Imm i -> 
-              emit_asm (Printf.sprintf "  li t4, %d" i);
-              "t4" in
-        (match op with
-        | Add -> emit_asm (Printf.sprintf "  add t5, %s, %s" lhs_reg rhs_reg)
-        | Sub -> emit_asm (Printf.sprintf "  sub t5, %s, %s" lhs_reg rhs_reg)
-        | Mul -> emit_asm (Printf.sprintf "  mul t5, %s, %s" lhs_reg rhs_reg)
-        | Div -> emit_asm (Printf.sprintf "  div t5, %s, %s" lhs_reg rhs_reg)
-        | Lt -> 
-            emit_asm (Printf.sprintf "  slt t5, %s, %s" lhs_reg rhs_reg)
-        | Le -> 
-            emit_asm (Printf.sprintf "  slt t5, %s, %s" rhs_reg lhs_reg);
-            emit_asm "  xori t5, t5, 1"
-        | Gt -> 
-            emit_asm (Printf.sprintf "  slt t5, %s, %s" rhs_reg lhs_reg)
-        | Ge -> 
-            emit_asm (Printf.sprintf "  slt t5, %s, %s" lhs_reg rhs_reg);
-            emit_asm "  xori t5, t5, 1"
-        | Eq -> 
-            emit_asm (Printf.sprintf "  xor t5, %s, %s" lhs_reg rhs_reg);
-            emit_asm "  sltiu t5, t5, 1"
-        | Ne -> 
-            emit_asm (Printf.sprintf "  xor t5, %s, %s" lhs_reg rhs_reg);
-            emit_asm "  sltu t5, zero, t5");
-        "t5"
         let dst_off = all_st (match dst with Reg r | Var r -> r | _ -> failwith "Bad dst") in
         let lhs_code = l_operand "t1" lhs in
         let rhs_code = l_operand "t2" rhs in
