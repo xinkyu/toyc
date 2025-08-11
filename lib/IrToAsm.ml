@@ -72,7 +72,7 @@ let com_inst (inst : ir_inst) : string =
       in
       let load_src = l_operand "t0" src in
       load_src ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  (* Not used *)
+  (* Not used in optimized path *)
   | Load (dst, src) ->
       let dst_off =
         all_st
@@ -80,7 +80,7 @@ let com_inst (inst : ir_inst) : string =
       in
       let src_code = l_operand "t1" src in
       src_code ^ "\tlw t0, 0(t1)\n" ^ Printf.sprintf "\tsw t0, %d(sp)\n" dst_off
-  (* Not used *)
+  (* Not used in optimized path *)
   | Store (dst, src) ->
       let dst_code = l_operand "t1" dst in
       let src_code = l_operand "t2" src in
@@ -101,6 +101,7 @@ let com_inst (inst : ir_inst) : string =
         |> String.concat ""
       in
       args_code ^ Printf.sprintf "\tcall %s\n\tsw a0, %d(sp)\n" fname dst_off
+  (* These are now handled by com_terminator for optimized functions *)
   | Ret None ->
       let ra_offset = get_sto "ra" in
       Printf.sprintf
@@ -119,8 +120,36 @@ let com_inst (inst : ir_inst) : string =
       cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" label
   | Label label -> Printf.sprintf "%s:\n" label
 
+(* 新增：翻译基本块终结符 *)
+let com_terminator (term : ir_term) : string =
+  match term with
+  | TermGoto label -> Printf.sprintf "\tj %s\n" label
+  | TermIf (cond, l_true, l_false) ->
+      let cond_code = l_operand "t0" cond in
+      cond_code ^ Printf.sprintf "\tbne t0, x0, %s\n" l_true
+      ^ Printf.sprintf "\tj %s\n" l_false
+  | TermRet None ->
+      let ra_offset = get_sto "ra" in
+      Printf.sprintf
+        "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
+        ra_offset
+  | TermRet (Some op) ->
+      let load_code = l_operand "a0" op in
+      let ra_offset = get_sto "ra" in
+      load_code
+      ^ Printf.sprintf
+          "\tlw ra, %d(sp)\n\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n"
+          ra_offset
+  | TermSeq label ->
+      (* 为确保正确性，总是生成跳转 *)
+      Printf.sprintf "\tj %s\n" label
+
+(* 修改：为基本块生成代码，包括标签、指令和终结符 *)
 let com_block (blk : ir_block) : string =
-  blk.insts |> List.map com_inst |> String.concat ""
+  let label_code = Printf.sprintf "%s:\n" blk.label in
+  let insts_code = blk.insts |> List.map com_inst |> String.concat "" in
+  let terminator_code = com_terminator blk.terminator in
+  label_code ^ insts_code ^ terminator_code
 
 let com_func (f : ir_func) : string =
   Hashtbl.clear v_env;
@@ -182,10 +211,11 @@ let com_func_o (f : ir_func_o) : string =
   let pae_set =
     pae_set ^ Printf.sprintf "\tsw ra, %d(sp)\n" (all_st "ra")
   in
-
+  
+  (* 修改：现在 com_block 会生成完整的带控制流的代码 *)
   let body_code = f.blocks |> List.map com_block |> String.concat "" in
 
-  (* 检查 body_code 是否以 ret 结束; 没有默认添加 "\taddi sp, sp, 800\n\taddi sp,sp,800\n\tret\n" 语句; 其实可以前移到 IR 阶段 *)
+  (* 检查 body_code 是否以 ret 结束; 这个检查可能不再是必须的，因为终结符现在被正确处理, 但保留无害 *)
   let body_code =
     if not (String.ends_with ~suffix:"\tret\n" body_code) then
       body_code

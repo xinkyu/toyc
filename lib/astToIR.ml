@@ -103,8 +103,7 @@ let rec expr_ir (ctx : context) (e : expr) : operand * ir_inst list =
             match op with
             | Plus -> Imm n (* +n = n *)
             | Minus -> Imm (-n) (* -n *)
-            | Not -> Imm (if n = 0 then 1 else 0)
-            (* !n *)
+            | Not -> Imm (if n = 0 then 1 else 0) (* !n *)
           in
           (folded, code)
       | _ ->
@@ -328,15 +327,17 @@ let func_ir (f : func_def) : ir_func =
 let pblocks (insts : ir_inst list) : ir_block list =
   let rec split acc curr label labelmap insts =
     match insts with
-    | [] -> 
-        List.rev acc
-        (*| _ -> failwith "Basic block must end with a terminator")*)
+    | [] ->
+        (* 如果最后还有指令，需要把它们打包成一个块 *)
+        (match curr with
+         | [] -> List.rev acc
+         | _ -> List.rev ({ label; insts=List.rev curr; terminator=TermRet None; preds=[]; succs=[] } :: acc))
     | Label l :: rest -> (
         (* 当前块结束，开启新块 *)
         match curr with
         | [] ->
             let next_label, labelmap' = fIRlabel labelmap l in
-            split acc [ Label l ] next_label labelmap' rest
+            split acc [] next_label labelmap' rest
         | _ ->
             let next_label, labelmap' = fIRlabel labelmap l in
             let blk =
@@ -349,17 +350,14 @@ let pblocks (insts : ir_inst list) : ir_block list =
               }
             in
             let acc' = blk :: acc in
-            split acc' [ Label l ] next_label labelmap' rest)
+            split acc' [] next_label labelmap' rest)
     | Goto l :: rest ->
         let goto_label, labelmap' = fIRlabel labelmap l in
-        (* 刷新一个无意义的 blk, 确保编程者不会出现的 label *)
-        let next_label, labelmap'' =
-          fIRlabel labelmap' ("__blk" ^ string_of_int !irlabid)
-        in
+        let next_label, labelmap'' = fIRlabel labelmap' ("__blk" ^ string_of_int !irlabid) in
         let blk =
           {
             label;
-            insts = List.rev (Goto l :: curr);
+            insts = List.rev curr; (* 修正：不把 Goto 放入 insts *)
             terminator = TermGoto goto_label;
             preds = [];
             succs = [];
@@ -368,13 +366,11 @@ let pblocks (insts : ir_inst list) : ir_block list =
         split (blk :: acc) [] next_label labelmap'' rest
     | IfGoto (cond, l) :: rest ->
         let then_label, labelmap' = fIRlabel labelmap l in
-        let else_label, labelmap'' =
-          fIRlabel labelmap' ("__else" ^ string_of_int !irlabid)
-        in
+        let else_label, labelmap'' = fIRlabel labelmap' ("__else" ^ string_of_int !irlabid) in
         let blk =
           {
             label;
-            insts = List.rev (IfGoto (cond, l) :: curr);
+            insts = List.rev curr; (* 修正：不把 IfGoto 放入 insts *)
             terminator = TermIf (cond, then_label, else_label);
             preds = [];
             succs = [];
@@ -382,13 +378,11 @@ let pblocks (insts : ir_inst list) : ir_block list =
         in
         split (blk :: acc) [] else_label labelmap'' rest
     | Ret op :: rest ->
-        let next_label, labelmap' =
-          fIRlabel labelmap ("__ret" ^ string_of_int !irlabid)
-        in
+        let next_label, labelmap' = fIRlabel labelmap ("__ret" ^ string_of_int !irlabid) in
         let blk =
           {
             label;
-            insts = List.rev (Ret op :: curr);
+            insts = List.rev curr; (* 修正：不把 Ret 放入 insts *)
             terminator = TermRet op;
             preds = [];
             succs = [];
@@ -417,10 +411,11 @@ let func_iro (f : func_def) : ir_func_o =
     | _ -> bodycode
   in
   let raw_blocks = pblocks linear_ir in
-  (* 构建前驱/后继关系，并剔除空块/重复块 *)
-  let cfg_blocks = Cfg.build_cfg raw_blocks in
-  let opt_blocks = Cfg.optimize cfg_blocks in
-  { name = f.func_name; args = f.params; blocks = opt_blocks }
+  (* 将函数名、参数和块组装成 ir_func_o 对象 *)
+  let pre_opt_func = { name = f.func_name; args = f.params; blocks = raw_blocks } in
+  (* 调用新的优化器，它接收整个函数结构 *)
+  let optimized_func = Cfg.optimize pre_opt_func in
+  optimized_func
 
 (* 编译单元转换 *)
 let program_ir (cu : comp_unit) (optimize_flag : bool) : ir_program =
