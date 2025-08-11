@@ -52,7 +52,9 @@ let store_operand allocation_map spill_base_offset source_reg dst =
 let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_base epilogue_label : string =
   match inst with
   | Binop (op, dst, lhs, rhs) ->
+      (* First ensure lhs is in a register *)
       let code1, reg1 = ensure_in_reg allocation_map spill_base_offset "t5" lhs in
+      (* Then ensure rhs is in a different register *)
       let code2, reg2 = ensure_in_reg allocation_map spill_base_offset "t6" rhs in
       let op_code =
         match op with
@@ -94,7 +96,9 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
       let active_phys_regs =
         Hashtbl.fold (fun _ alloc acc ->
           match alloc with
-          | PhysicalRegister r -> if List.mem r available_registers then r :: acc else acc
+          | PhysicalRegister r -> 
+              if List.mem r available_registers || r = "t5" || r = "t6" then r :: acc 
+              else acc
           | StackSlot _ -> acc
         ) allocation_map []
         |> List.sort_uniq compare
@@ -111,8 +115,11 @@ let com_inst_o (inst : ir_inst) allocation_map spill_base_offset caller_save_bas
       let args_code =
         List.mapi (fun i arg ->
           if i < 8 then
-            load_operand allocation_map spill_base_offset (Printf.sprintf "a%d" i) arg
+            (* For register arguments, first load into t5 to avoid clobbering *)
+            let load_to_temp = load_operand allocation_map spill_base_offset "t5" arg in
+            load_to_temp ^ Printf.sprintf "\tmv a%d, t5\n" i
           else
+            (* For stack arguments, load into t5 and store *)
             let arg_code, reg = ensure_in_reg allocation_map spill_base_offset "t5" arg in
             arg_code ^ Printf.sprintf "\tsw %s, %d(sp)\n" reg ((i-8)*4)
         ) args

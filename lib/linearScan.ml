@@ -102,11 +102,34 @@ let allocate (intervals: interval list) : (string, allocation_result) Hashtbl.t 
       Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
       active := List.sort (fun a b -> compare a.finish b.finish) (current_interval :: !active);
     end else begin
-      (* No free registers, must spill. To avoid the complex (and currently buggy)
-         logic of spilling an *active* interval and moving its value to the stack,
-         we will always spill the *current* interval. This is less optimal but guarantees correctness. *)
-      spill_offset := !spill_offset + 4;
-      Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset)
+      (* No free registers, find the interval that ends furthest in the future *)
+      let spill_candidate = ref current_interval in
+      let max_finish = ref current_interval.finish in
+      List.iter (fun (active_interval:interval) ->
+        match Hashtbl.find allocation_map active_interval.var_name with
+        | PhysicalRegister _ ->
+            if active_interval.finish > !max_finish then begin
+              spill_candidate := active_interval;
+              max_finish := active_interval.finish
+            end
+        | StackSlot _ -> ()
+      ) !active;
+      
+      if !spill_candidate == current_interval then begin
+        (* Spill the current interval *)
+        spill_offset := !spill_offset + 4;
+        Hashtbl.add allocation_map current_interval.var_name (StackSlot !spill_offset)
+      end else begin
+        (* Spill the candidate and reuse its register *)
+        let reg = match Hashtbl.find allocation_map !spill_candidate.var_name with
+          | PhysicalRegister r -> r
+          | _ -> failwith "Unexpected: spill candidate has no register"
+        in
+        spill_offset := !spill_offset + 4;
+        Hashtbl.replace allocation_map !spill_candidate.var_name (StackSlot !spill_offset);
+        Hashtbl.add allocation_map current_interval.var_name (PhysicalRegister reg);
+        active := List.sort (fun a b -> compare a.finish b.finish) (current_interval :: !active)
+      end
     end
 
   ) sorted_intervals;
