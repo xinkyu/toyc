@@ -119,49 +119,47 @@ let process_inst env inst =
 
   | Goto _ | Label _ as t -> t, env
 
+(* 增强：在常量传播时简化条件分支 *)
 let process_terminator env term =
   match term with
-  | TermIf (cond, l1, l2) -> TermIf (eval_operand env cond, l1, l2)
+  | TermIf (cond, l1, l2) ->
+      (match eval_operand env cond with
+       | Imm 0 -> TermGoto l2 (* 条件为假，跳转到 else 分支 *)
+       | Imm _ -> TermGoto l1 (* 条件为非零(真)，跳转到 then 分支 *)
+       | v -> TermIf (v, l1, l2))
   | TermRet o -> TermRet (Option.map (eval_operand env) o)
   | TermGoto _ | TermSeq _ as t -> t
 
 (* 构建 CFG 并清理不可达块 *)
 let build_cfg (blocks : ir_block list) : ir_block list =
   if blocks = [] then [] else
-  (* 1. 构造 label -> block 的映射 *)
   let label_map =
     List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks
   in
-  (* 2. 清空 preds/succs *)
   List.iter (fun b -> b.preds <- []; b.succs <- []) blocks;
-  (* 3. 填充 preds/succs *)
   List.iter (fun b ->
     let add_edge from_lbl to_lbl =
-      match StringMap.find_opt to_lbl label_map with
-      | Some succ ->
+      try let succ = StringMap.find to_lbl label_map in
           b.succs <- to_lbl :: b.succs;
           succ.preds <- from_lbl :: succ.preds
-      | None -> ()  (* 忽略不存在的目标 *)
+      with Not_found -> ()
     in
     match b.terminator with
-    | TermGoto l        -> add_edge b.label l
-    | TermSeq l         -> add_edge b.label l
+    | TermGoto l | TermSeq l -> add_edge b.label l
     | TermIf (_, l1, l2) -> add_edge b.label l1; add_edge b.label l2
-    | TermRet _         -> ()
+    | TermRet _ -> ()
   ) blocks;
-  (* 4. 不可达块清理：从入口执行 DFS *)
   let entry_label = (List.hd blocks).label in
   let visited = Hashtbl.create (List.length blocks) in
   let rec dfs lbl =
     if not (Hashtbl.mem visited lbl) then begin
       Hashtbl.add visited lbl ();
-      match StringMap.find_opt lbl label_map with
-      | Some blk -> List.iter dfs blk.succs
-      | None     -> ()
+      try let blk = StringMap.find lbl label_map in
+          List.iter dfs blk.succs
+      with Not_found -> ()
     end
   in
   dfs entry_label;
-  (* 5. 过滤并返回可达块，并修剪 succs/preds *)
   let reachable = List.filter (fun b -> Hashtbl.mem visited b.label) blocks in
   let reach_set = List.fold_left (fun s b -> StringMap.add b.label () s) StringMap.empty reachable in
   List.iter (fun b ->
@@ -170,7 +168,8 @@ let build_cfg (blocks : ir_block list) : ir_block list =
   ) reachable;
   reachable
 
-let constant_propagation (blocks : ir_block list) : ir_block list =
+let constant_propagation (blocks : ir_block list) : (ir_block list * bool) =
+  if blocks = [] then (blocks, false) else
   let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
   let in_envs = ref StringMap.empty in
   let out_envs = ref StringMap.empty in
@@ -180,9 +179,12 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
   ) blocks;
   let worklist = Queue.create () in
   List.iter (fun b -> Queue.add b.label worklist) blocks;
+  let changed = ref false in
   while not (Queue.is_empty worklist) do
     let label = Queue.take worklist in
     let blk = StringMap.find label block_map in
+    let old_insts = blk.insts in
+    let old_term = blk.terminator in
     let preds = blk.preds in
     let in_env =
       if preds = [] then StringMap.empty
@@ -194,15 +196,94 @@ let constant_propagation (blocks : ir_block list) : ir_block list =
       acc @ [inst'], env'
     ) ([], in_env) blk.insts in
     let new_term = process_terminator out_env blk.terminator in
+    if old_insts <> new_insts || old_term <> new_term then changed := true;
     let old_out = StringMap.find label !out_envs in
     if not (StringMap.equal (=) out_env old_out) then begin
       out_envs := StringMap.add label out_env !out_envs;
-      List.iter (fun succ -> Queue.add succ worklist) blk.succs
+      List.iter (fun succ -> if StringMap.mem succ block_map then Queue.add succ worklist) blk.succs
     end;
     blk.insts <- new_insts;
     blk.terminator <- new_term;
   done;
-  blocks
+  (blocks, !changed)
 
-let optimize blocks =
-  blocks |> build_cfg |> constant_propagation
+let tail_recursion_optimization (func : ir_func_o) : ir_func_o =
+  let open Ir in
+  if func.blocks = [] then func else
+  let entry_label = (List.hd func.blocks).label in
+  let current_func_name = func.name in
+  let params = func.args in
+  let modified = ref false in
+  List.iter (fun block ->
+    match block.terminator with
+    | TermRet (Some ret_val) -> (
+        match List.rev block.insts with
+        | Call (dst, fname, args) :: rest_rev ->
+            if fname = current_func_name && dst = ret_val && List.length params = List.length args then
+            begin
+              let insts_without_call = List.rev rest_rev in
+              let assignments = List.map2 (fun p a -> Assign (Var p, a)) params args in
+              block.insts <- insts_without_call @ assignments;
+              block.terminator <- TermGoto entry_label;
+              modified := true
+            end
+        | _ -> ()
+      )
+    | _ -> ()
+  ) func.blocks;
+  if !modified then { func with blocks = build_cfg func.blocks } else func
+
+(* 修正：块合并只执行一轮，并返回是否修改过的标志 *)
+let merge_blocks_pass (blocks : ir_block list) : (ir_block list * bool) =
+  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
+  let merged_out_tbl = Hashtbl.create (List.length blocks) in
+  let modified = ref false in
+  List.iter (fun b ->
+    if not (Hashtbl.mem merged_out_tbl b.label) then
+      match b.terminator with
+      | TermGoto target_label | TermSeq target_label ->
+        (try
+          let target_block = StringMap.find target_label block_map in
+          if List.length target_block.preds = 1 && List.hd target_block.preds = b.label then
+          begin
+            b.insts <- b.insts @ target_block.insts;
+            b.terminator <- target_block.terminator;
+            Hashtbl.add merged_out_tbl target_label ();
+            modified := true
+          end
+        with Not_found -> ())
+      | _ -> ()
+  ) blocks;
+  (List.filter (fun b -> not (Hashtbl.mem merged_out_tbl b.label)) blocks, !modified)
+
+(* 重构：使用不动点迭代的优化流程 *)
+let optimize (func : ir_func_o) : ir_func_o =
+  let func_ref = ref { func with blocks = build_cfg func.blocks } in
+  
+  (* 1. 尾递归优化 (只需运行一次) *)
+  func_ref := tail_recursion_optimization !func_ref;
+
+  (* 2. 交替运行常量传播和块合并，直到没有优化可做 *)
+  let changed_in_iter = ref true in
+  while !changed_in_iter do
+    changed_in_iter := false;
+
+    (* 常量传播 *)
+    let (cp_blocks, cp_changed) = constant_propagation !func_ref.blocks in
+    if cp_changed then
+    begin
+      changed_in_iter := true;
+      (* CP可能简化了分支，需要重建CFG *)
+      func_ref := {!func_ref with blocks = build_cfg cp_blocks};
+    end;
+    
+    (* 块合并 *)
+    let (merged_blocks, merged_changed) = merge_blocks_pass !func_ref.blocks in
+    if merged_changed then
+    begin
+      changed_in_iter := true;
+      (* 合并后需要重建CFG *)
+      func_ref := {!func_ref with blocks = build_cfg merged_blocks}
+    end
+  done;
+  !func_ref
