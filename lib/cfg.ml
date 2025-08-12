@@ -261,56 +261,70 @@ let identify_loops (blocks : ir_block list) (dominators : StringSet.t StringMap.
   ) [] blocks in
   
   (* 对于每个返祖边，找出循环体中的所有基本块 *)
-  List.map (fun (from_label, header_label) ->
-    let rec collect_loop_body worklist body =
-      match worklist with
-      | [] -> body
-      | curr :: rest ->
-          if StringSet.mem curr body then
-            collect_loop_body rest body
-          else
-            let new_body = StringSet.add curr body in
-            let block = StringMap.find curr block_map in
-            let new_worklist = 
-              List.filter (fun pred -> not (StringSet.mem pred new_body))
-                block.preds @ rest
-            in
-            collect_loop_body new_worklist new_body
-    in
-    let loop_body = collect_loop_body [from_label] StringSet.empty in
-    (header_label, StringSet.elements loop_body)
+  List.filter_map (fun (from_label, header_label) ->
+    try
+      let rec collect_loop_body worklist body =
+        match worklist with
+        | [] -> body
+        | curr :: rest ->
+            if StringSet.mem curr body then
+              collect_loop_body rest body
+            else
+              let new_body = StringSet.add curr body in
+              match StringMap.find_opt curr block_map with
+              | None -> body  (* 如果找不到基本块，保持当前循环体不变 *)
+              | Some block ->
+                  let new_worklist = 
+                    List.filter (fun pred -> not (StringSet.mem pred new_body))
+                      block.preds @ rest
+                  in
+                  collect_loop_body new_worklist new_body
+      in
+      let loop_body = collect_loop_body [from_label] (StringSet.singleton header_label) in
+      Some (header_label, StringSet.elements loop_body)
+    with Not_found -> None  (* 如果在处理过程中出现任何查找错误，跳过这个循环 *)
   ) back_edges
 
 (* 创建循环前置头部 *)
 let create_preheader (blocks : ir_block list) (header : string) : ir_block list =
   let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
-  let header_block = StringMap.find header block_map in
-  
-  (* 找出所有来自循环外的前驱 *)
-  let outside_preds = List.filter (fun pred ->
-    not (List.exists (fun succ -> succ = header) (StringMap.find pred block_map).succs)
-  ) header_block.preds in
-  
-  if outside_preds = [] then blocks else
-  let preheader_label = header ^ "_ph" in
-  let preheader = {
-    label = preheader_label;
-    insts = [];
-    terminator = TermGoto header;
-    preds = outside_preds;
-    succs = [header]
-  } in
-  
-  (* 更新原有块的前驱后继关系 *)
-  List.iter (fun pred_label ->
-    let pred_block = StringMap.find pred_label block_map in
-    pred_block.succs <- List.map (fun s -> if s = header then preheader_label else s) pred_block.succs
-  ) outside_preds;
-  
-  header_block.preds <- preheader_label :: 
-    List.filter (fun p -> not (List.mem p outside_preds)) header_block.preds;
-  
-  preheader :: blocks
+  match StringMap.find_opt header block_map with
+  | None -> blocks  (* 如果找不到循环头，返回原始块列表 *)
+  | Some header_block ->
+      (* 找出所有来自循环外的前驱 *)
+      let outside_preds = List.filter (fun pred ->
+        match StringMap.find_opt pred block_map with
+        | None -> false  (* 如果找不到前驱块，忽略它 *)
+        | Some pred_block ->
+            not (List.exists (fun succ -> succ = header) pred_block.succs)
+      ) header_block.preds in
+      
+      if outside_preds = [] then blocks else
+      let preheader_label = header ^ "_ph" in
+      (* 检查是否已经存在前置头部 *)
+      if List.exists (fun b -> b.label = preheader_label) blocks then
+        blocks
+      else
+        let preheader = {
+          label = preheader_label;
+          insts = [];
+          terminator = TermGoto header;
+          preds = outside_preds;
+          succs = [header]
+        } in
+        
+        (* 更新原有块的前驱后继关系 *)
+        List.iter (fun pred_label ->
+          match StringMap.find_opt pred_label block_map with
+          | None -> ()  (* 如果找不到前驱块，跳过它 *)
+          | Some pred_block ->
+              pred_block.succs <- List.map (fun s -> if s = header then preheader_label else s) pred_block.succs
+        ) outside_preds;
+        
+        header_block.preds <- preheader_label :: 
+          List.filter (fun p -> not (List.mem p outside_preds)) header_block.preds;
+        
+        preheader :: blocks
 
 (* 分析循环不变量 *)
 let find_loop_invariants (blocks : ir_block list) (loop_blocks : string list) (_ : string) : ir_inst list =
@@ -374,14 +388,19 @@ let loop_invariant_code_motion (blocks : ir_block list) : (ir_block list * bool)
     let invariant_insts = find_loop_invariants !blocks_ref loop_blocks header in
     if invariant_insts <> [] then begin
       changed := true;
-      let preheader = List.find (fun b -> b.label = header ^ "_ph") !blocks_ref in
-      preheader.insts <- preheader.insts @ invariant_insts;
-      
-      (* 从循环中删除被移动的指令 *)
-      List.iter (fun label ->
-        let block = List.find (fun b -> b.label = label) !blocks_ref in
-        block.insts <- List.filter (fun inst -> not (List.mem inst invariant_insts)) block.insts
-      ) loop_blocks
+      let preheader_label = header ^ "_ph" in
+      match List.find_opt (fun b -> b.label = preheader_label) !blocks_ref with
+      | Some preheader ->
+          preheader.insts <- preheader.insts @ invariant_insts;
+          
+          (* 从循环中删除被移动的指令 *)
+          List.iter (fun label ->
+            match List.find_opt (fun b -> b.label = label) !blocks_ref with
+            | Some block ->
+                block.insts <- List.filter (fun inst -> not (List.mem inst invariant_insts)) block.insts
+            | None -> ()
+          ) loop_blocks
+      | None -> ()
     end
   ) loops;
   
