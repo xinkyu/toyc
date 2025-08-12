@@ -144,7 +144,6 @@ let constant_propagation (blocks : ir_block list) : (ir_block list * bool) =
   done;
   (blocks, !changed)
 
-(*******************************************************************)
 (* Dead Code Elimination *)
 (*******************************************************************)
 
@@ -164,7 +163,8 @@ let is_critical inst = match inst with Store _ | Call _ -> true | _ -> false
 let dead_code_elimination (blocks: ir_block list) : (ir_block list * bool) =
   if blocks = [] then ([], false) else
   let module B = StringMap in
-  let live_in = ref (B.map (fun _ -> VarSet.empty) (B.of_list (List.map (fun b -> (b.label, b)) blocks))) in
+  let block_map = List.fold_left (fun m b -> B.add b.label b m) B.empty blocks in
+  let live_in = ref (B.map (fun _ -> VarSet.empty) block_map) in
   let live_out = ref !live_in in
   let changed = ref true in
   while !changed do
@@ -193,218 +193,191 @@ let dead_code_elimination (blocks: ir_block list) : (ir_block list * bool) =
   (blocks, !dce_changed)
 
 (*******************************************************************)
-(* Loop-Invariant Code Motion (LICM) *)
+(* Loop Invariant Code Motion *)
 (*******************************************************************)
 
-(* 计算支配树 *)
-let compute_dominators (blocks : ir_block list) : (StringSet.t StringMap.t * StringSet.t StringMap.t) =
-  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
-  let all_nodes = StringSet.of_list (List.map (fun b -> b.label) blocks) in
+module LabelMap = StringMap
+module LabelSet = StringSet
+
+(* Dominator Analysis *)
+let compute_dominators (blocks : ir_block list) (entry_label : string) : LabelSet.t LabelMap.t =
+  let block_map = List.fold_left (fun m b -> LabelMap.add b.label b m) LabelMap.empty blocks in
+  let all_labels = List.fold_left (fun s b -> LabelSet.add b.label s) LabelSet.empty blocks in
+  let doms = ref (List.fold_left (fun m b ->
+    if b.label = entry_label then LabelMap.add b.label (LabelSet.singleton entry_label) m
+    else LabelMap.add b.label all_labels m
+  ) LabelMap.empty blocks) in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun b ->
+      if b.label <> entry_label then
+        let preds = b.preds in
+        let pred_doms = List.map (fun p -> LabelMap.find p !doms) preds in
+        let new_dom = LabelSet.add b.label (List.fold_left LabelSet.inter (if pred_doms = [] then LabelSet.empty else List.hd pred_doms) (if pred_doms = [] then [] else List.tl pred_doms)) in
+        if not (LabelSet.equal new_dom (LabelMap.find b.label !doms)) then (
+          doms := LabelMap.add b.label new_dom !doms;
+          changed := true
+        )
+    ) blocks
+  done;
+  !doms
+
+(* Loop Detection *)
+let find_loops (blocks : ir_block list) (doms : LabelSet.t LabelMap.t) : (string * LabelSet.t) list =
+  let loops = ref [] in
+  List.iter (fun b ->
+    List.iter (fun succ_label ->
+      if LabelSet.mem succ_label (LabelMap.find b.label doms) then (* Found a back edge b -> succ_label *)
+        let header_label = succ_label in
+        let loop_nodes = ref (LabelSet.singleton header_label) in
+        let stack = ref [b.label] in
+        while !stack <> [] do
+          let curr = List.hd !stack in
+          stack := List.tl !stack;
+          if not (LabelSet.mem curr !loop_nodes) then (
+            loop_nodes := LabelSet.add curr !loop_nodes;
+            let block = List.find (fun blk -> blk.label = curr) blocks in
+            List.iter (fun pred -> if pred <> header_label then stack := pred :: !stack) block.preds
+          )
+        done;
+        loops := (header_label, !loop_nodes) :: !loops
+    ) b.succs
+  ) blocks;
+  !loops
+
+(* Reaching Definitions Analysis *)
+module Def = struct
+  type t = string * int (* var_name * instruction_index_in_block *)
+  let compare = compare
+end
+module DefSet = Set.Make(Def)
+module DefMap = Map.Make(String)
+
+let reaching_definitions (blocks : ir_block list) : DefSet.t LabelMap.t * DefSet.t LabelMap.t =
+  let block_map = List.fold_left (fun m b -> LabelMap.add b.label b m) LabelMap.empty blocks in
+  let all_vars = List.fold_left (fun acc b ->
+    List.fold_left (fun acc i ->
+      VarSet.union acc (def i)
+    ) acc b.insts
+  ) VarSet.empty blocks in
+  let kill_sets = LabelMap.mapi (fun label b ->
+    let block_defs = ref DefMap.empty in
+    List.iteri (fun i inst ->
+      VarSet.iter (fun v -> block_defs := DefMap.add v (DefSet.singleton (v, i)) !block_defs) (def inst)
+    ) b.insts;
+    VarSet.fold (fun var acc ->
+      let defs_of_var = List.fold_left (fun s blk ->
+        List.iteri (fun i inst ->
+          if VarSet.mem var (def inst) then s := DefSet.add (var, i) !s
+        ) blk.insts;
+        !s
+      ) (ref DefSet.empty) blocks in
+      let block_defs_of_var = try DefMap.find var !block_defs with Not_found -> DefSet.empty in
+      DefSet.union acc (DefSet.diff defs_of_var block_defs_of_var)
+    ) all_vars DefSet.empty
+  ) block_map in
+  let gen_sets = LabelMap.mapi (fun label b ->
+    List.fold_left (fun acc (i, inst) ->
+      VarSet.fold (fun v s -> DefSet.add (v, i) s) (def inst) acc
+    ) DefSet.empty (List.mapi (fun i x -> (i, x)) b.insts)
+  ) block_map in
+
+  let in_sets = ref (LabelMap.map (fun _ -> DefSet.empty) block_map) in
+  let out_sets = ref (LabelMap.map (fun _ -> DefSet.empty) block_map) in
+  let worklist = Queue.create () in
+  List.iter (fun b -> Queue.add b.label worklist) blocks;
+
+  while not (Queue.is_empty worklist) do
+    let label = Queue.take worklist in
+    let block = LabelMap.find label block_map in
+    let pred_outs = List.map (fun p -> LabelMap.find p !out_sets) block.preds in
+    let new_in = List.fold_left DefSet.union DefSet.empty pred_outs in
+    in_sets := LabelMap.add label new_in !in_sets;
+
+    let old_out = LabelMap.find label !out_sets in
+    let new_out = DefSet.union (LabelMap.find label gen_sets) (DefSet.diff new_in (LabelMap.find label kill_sets)) in
+    if not (DefSet.equal old_out new_out) then (
+      out_sets := LabelMap.add label new_out !out_sets;
+      List.iter (fun succ -> Queue.add succ worklist) block.succs
+    )
+  done;
+  (!in_sets, !out_sets)
+
+let get_def_sites (var : string) (defs : DefSet.t) : LabelSet.t =
+  DefSet.fold (fun (v, block_idx) acc ->
+    if v = var then LabelSet.add (string_of_int block_idx) acc else acc
+  ) defs LabelSet.empty
+
+let is_invariant (inst : ir_inst) (loop_nodes : LabelSet.t) (in_defs : DefSet.t LabelMap.t) (block_map : ir_block LabelMap.t) : bool =
+  let inst_uses = use inst in
+  let is_movable = match inst with
+    | Store _ | Call _ -> false
+    | _ -> true
+  in
+  is_movable && VarSet.for_all (fun var_name ->
+    let reaching = in_defs in (* This is a simplification, should be defs reaching this specific instruction *)
+    let def_sites = ref [] in
+    LabelSet.iter (fun node_label ->
+      let block = LabelMap.find node_label block_map in
+      let block_in_defs = LabelMap.find node_label reaching in
+      List.iteri (fun i ins ->
+        if inst == ins then
+          DefSet.iter (fun (v, def_block_idx) ->
+            if v = var_name then
+              def_sites := def_block_idx :: !def_sites
+          ) block_in_defs
+      ) block.insts
+    ) loop_nodes;
+    List.for_all (fun site -> not (LabelSet.mem (string_of_int site) loop_nodes)) !def_sites
+  ) inst_uses
+
+let licm (blocks : ir_block list) : (ir_block list * bool) =
+  if blocks = [] then (blocks, false) else
   let entry_label = (List.hd blocks).label in
-  
-  (* 初始化支配集合：入口节点只被自己支配，其他节点被所有节点支配 *)
-  let init_doms = StringMap.fold (fun label _ acc ->
-    if label = entry_label then
-      StringMap.add label (StringSet.singleton label) acc
-    else
-      StringMap.add label all_nodes acc
-  ) block_map StringMap.empty in
-  
-  (* 计算一个节点的支配者集合 *)
-  let compute_new_doms curr_label doms =
-    let curr_block = StringMap.find curr_label block_map in
-    let pred_doms = 
-      match curr_block.preds with
-      | [] -> StringSet.singleton curr_label  (* 入口节点 *)
-      | p::ps -> 
-          List.fold_left (fun acc pred ->
-            StringSet.inter acc (StringMap.find pred doms)
-          ) (StringMap.find p doms) ps
-    in
-    StringSet.add curr_label pred_doms
-  in
-  
-  (* 迭代计算支配关系直到不变 *)
-  let rec fix_point doms =
-    let new_doms = StringMap.fold (fun label _ acc ->
-      StringMap.add label (compute_new_doms label doms) acc
-    ) block_map StringMap.empty in
-    if StringMap.equal StringSet.equal doms new_doms then doms
-    else fix_point new_doms
-  in
-  
-  let dominators = fix_point init_doms in
-  
-  (* 计算严格支配者集合 *)
-  let strict_dominators = StringMap.map (fun dom_set ->
-    StringSet.remove (StringSet.choose dom_set) dom_set  (* 移除节点自身 *)
-  ) dominators in
-  
-  (dominators, strict_dominators)
-
-(* 识别循环 *)
-let identify_loops (blocks : ir_block list) (dominators : StringSet.t StringMap.t) : (string * string list) list =
-  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
-  
-  (* 检查是否存在返祖边 *)
-  let is_back_edge from_label to_label =
-    StringSet.mem from_label (StringMap.find to_label dominators)
-  in
-  
-  (* 收集所有返祖边 *)
-  let back_edges = List.fold_left (fun acc block ->
-    List.fold_left (fun acc' succ ->
-      if is_back_edge block.label succ then
-        (block.label, succ) :: acc'
-      else acc'
-    ) acc block.succs
-  ) [] blocks in
-  
-  (* 对于每个返祖边，找出循环体中的所有基本块 *)
-  List.filter_map (fun (from_label, header_label) ->
-    try
-      let rec collect_loop_body worklist body =
-        match worklist with
-        | [] -> body
-        | curr :: rest ->
-            if StringSet.mem curr body then
-              collect_loop_body rest body
-            else
-              let new_body = StringSet.add curr body in
-              match StringMap.find_opt curr block_map with
-              | None -> body  (* 如果找不到基本块，保持当前循环体不变 *)
-              | Some block ->
-                  let new_worklist = 
-                    List.filter (fun pred -> not (StringSet.mem pred new_body))
-                      block.preds @ rest
-                  in
-                  collect_loop_body new_worklist new_body
-      in
-      let loop_body = collect_loop_body [from_label] (StringSet.singleton header_label) in
-      Some (header_label, StringSet.elements loop_body)
-    with Not_found -> None  (* 如果在处理过程中出现任何查找错误，跳过这个循环 *)
-  ) back_edges
-
-(* 创建循环前置头部 *)
-let create_preheader (blocks : ir_block list) (header : string) : ir_block list =
-  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
-  match StringMap.find_opt header block_map with
-  | None -> blocks  (* 如果找不到循环头，返回原始块列表 *)
-  | Some header_block ->
-      (* 找出所有来自循环外的前驱 *)
-      let outside_preds = List.filter (fun pred ->
-        match StringMap.find_opt pred block_map with
-        | None -> false  (* 如果找不到前驱块，忽略它 *)
-        | Some pred_block ->
-            not (List.exists (fun succ -> succ = header) pred_block.succs)
-      ) header_block.preds in
-      
-      if outside_preds = [] then blocks else
-      let preheader_label = header ^ "_ph" in
-      (* 检查是否已经存在前置头部 *)
-      if List.exists (fun b -> b.label = preheader_label) blocks then
-        blocks
-      else
-        let preheader = {
-          label = preheader_label;
-          insts = [];
-          terminator = TermGoto header;
-          preds = outside_preds;
-          succs = [header]
-        } in
-        
-        (* 更新原有块的前驱后继关系 *)
-        List.iter (fun pred_label ->
-          match StringMap.find_opt pred_label block_map with
-          | None -> ()  (* 如果找不到前驱块，跳过它 *)
-          | Some pred_block ->
-              pred_block.succs <- List.map (fun s -> if s = header then preheader_label else s) pred_block.succs
-        ) outside_preds;
-        
-        header_block.preds <- preheader_label :: 
-          List.filter (fun p -> not (List.mem p outside_preds)) header_block.preds;
-        
-        preheader :: blocks
-
-(* 分析循环不变量 *)
-let find_loop_invariants (blocks : ir_block list) (loop_blocks : string list) (_ : string) : ir_inst list =
-  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
-  
-  (* 检查操作数是否循环不变 *)
-  let is_operand_invariant op defined_in_loop =
-    match op with
-    | Imm _ -> true
-    | Var name | Reg name ->
-        not (StringSet.mem name defined_in_loop)
-  in
-  
-  (* 收集循环内定义的变量 *)
-  let defined_in_loop = List.fold_left (fun acc label ->
-    let block = StringMap.find label block_map in
-    List.fold_left (fun acc' inst ->
-      match inst with
-      | Binop(_, dst, _, _) | Unop(_, dst, _) | Load(dst, _)
-      | Call(dst, _, _) | Assign(dst, _) ->
-          (match dst with
-           | Var name | Reg name -> StringSet.add name acc'
-           | _ -> acc')
-      | _ -> acc'
-    ) acc block.insts
-  ) StringSet.empty loop_blocks in
-  
-  (* 检查指令是否循环不变 *)
-  let is_inst_invariant inst =
-    match inst with
-    | Binop(_, _, src1, src2) ->
-        is_operand_invariant src1 defined_in_loop &&
-        is_operand_invariant src2 defined_in_loop
-    | Unop(_, _, src) ->
-        is_operand_invariant src defined_in_loop
-    | Assign(_, src) ->
-        is_operand_invariant src defined_in_loop
-    | _ -> false
-  in
-  
-  (* 收集所有循环不变量指令 *)
-  List.fold_left (fun acc label ->
-    let block = StringMap.find label block_map in
-    List.fold_left (fun acc' inst ->
-      if is_inst_invariant inst then inst :: acc'
-      else acc'
-    ) acc block.insts
-  ) [] loop_blocks
-
-(* LICM主函数 *)
-let loop_invariant_code_motion (blocks : ir_block list) : (ir_block list * bool) =
-  if blocks = [] then ([], false) else
+  let block_map = ref (List.fold_left (fun m b -> LabelMap.add b.label b m) LabelMap.empty blocks) in
+  let doms = compute_dominators blocks entry_label in
+  let loops = find_loops blocks doms in
+  let (in_defs, _) = reaching_definitions blocks in
   let changed = ref false in
-  let (dominators, _) = compute_dominators blocks in
-  let loops = identify_loops blocks dominators in
-  
-  (* 为每个循环创建前置头部并进行代码移动 *)
-  let blocks_ref = ref blocks in
-  List.iter (fun (header, loop_blocks) ->
-    blocks_ref := create_preheader !blocks_ref header;
-    let invariant_insts = find_loop_invariants !blocks_ref loop_blocks header in
-    if invariant_insts <> [] then begin
-      changed := true;
-      let preheader_label = header ^ "_ph" in
-      match List.find_opt (fun b -> b.label = preheader_label) !blocks_ref with
-      | Some preheader ->
-          preheader.insts <- preheader.insts @ invariant_insts;
-          
-          (* 从循环中删除被移动的指令 *)
-          List.iter (fun label ->
-            match List.find_opt (fun b -> b.label = label) !blocks_ref with
-            | Some block ->
-                block.insts <- List.filter (fun inst -> not (List.mem inst invariant_insts)) block.insts
-            | None -> ()
-          ) loop_blocks
-      | None -> ()
-    end
+  let new_blocks = ref blocks in
+
+  List.iter (fun (header_label, loop_nodes) ->
+    let header = LabelMap.find header_label !block_map in
+    let preheader_label = header_label ^ "_preheader" in
+    let preheader = { label=preheader_label; insts=[]; terminator=TermGoto header_label; preds=[]; succs=[header_label]; phis=[] } in
+    new_blocks := preheader :: !new_blocks;
+    block_map := LabelMap.add preheader_label preheader !block_map;
+    changed := true;
+
+    let outside_preds = List.filter (fun p -> not (LabelSet.mem p loop_nodes)) header.preds in
+    List.iter (fun pred_label ->
+      let pred_block = LabelMap.find pred_label !block_map in
+      pred_block.succs <- preheader_label :: (List.filter (fun s -> s <> header_label) pred_block.succs);
+      pred_block.terminator <- (match pred_block.terminator with
+        | TermGoto l when l = header_label -> TermGoto preheader_label
+        | TermSeq l when l = header_label -> TermSeq preheader_label
+        | TermIf (c, t, f) when t = header_label -> TermIf (c, preheader_label, f)
+        | TermIf (c, t, f) when f = header_label -> TermIf (c, t, preheader_label)
+        | other -> other)
+    ) outside_preds;
+    preheader.preds <- outside_preds;
+    header.preds <- preheader_label :: (List.filter (fun p -> LabelSet.mem p loop_nodes) header.preds);
+
+    let invariant_insts = ref [] in
+    LabelSet.iter (fun node_label ->
+      let block = LabelMap.find node_label !block_map in
+      let (remaining_insts, moved_insts) = List.partition (fun inst ->
+        let is_inv = is_invariant inst loop_nodes in_defs !block_map in
+        if is_inv then changed := true;
+        not is_inv
+      ) block.insts in
+      block.insts <- remaining_insts;
+      invariant_insts := !invariant_insts @ moved_insts
+    ) loop_nodes;
+    preheader.insts <- preheader.insts @ !invariant_insts;
   ) loops;
-  
-  (!blocks_ref, !changed)
+  (!new_blocks, !changed)
 
 (*******************************************************************)
 (* Other Optimizations & Main Loop *)
@@ -446,16 +419,58 @@ let optimize (func : ir_func_o) : ir_func_o =
       if changed then changed_in_iter := true;
       { !func_ref with blocks = build_cfg new_blocks }
     in
-    (* 先进行常量传播，为LICM创造更多机会 *)
     func_ref := run_pass constant_propagation;
-    
-    (* 执行循环不变量代码外提 *)
-    func_ref := run_pass loop_invariant_code_motion;
-    
-    (* 最后进行死代码消除，清理可能产生的无用代码 *)
+    let (licm_blocks, licm_changed) = licm !func_ref.blocks in
+    if licm_changed then (changed_in_iter := true; func_ref := { !func_ref with blocks = build_cfg licm_blocks });
     func_ref := run_pass dead_code_elimination;
-    
-    (* 尾递归优化 *)
+    let (tro_func, tro_changed) = tail_recursion_optimization !func_ref in
+    if tro_changed then (changed_in_iter := true; func_ref := {tro_func with blocks = build_cfg tro_func.blocks});
+  done;
+  !func_ref
+
+(*******************************************************************)
+(* Other Optimizations & Main Loop *)
+(*******************************************************************)
+
+let tail_recursion_optimization (func : ir_func_o) : (ir_func_o * bool) =
+  let open Ir in if func.blocks = [] then (func, false) else
+  let entry_label = (List.hd func.blocks).label in
+  let current_func_name = func.name and params = func.args in
+  let modified = ref false in
+  List.iter (fun block ->
+    match block.terminator with
+    | TermRet (Some ret_val) ->
+        (match List.rev block.insts with
+        | Assign(dst_assign, src_assign) :: Call(dst_call, fname, args) :: rest_rev
+           when dst_assign = ret_val && src_assign = dst_call && fname = current_func_name && List.length params = List.length args ->
+            let assignments = List.map2 (fun p a -> Assign (Var p, a)) params args in
+            block.insts <- (List.rev rest_rev) @ assignments;
+            block.terminator <- TermGoto entry_label;
+            modified := true
+        | Call (dst, fname, args) :: rest_rev
+          when fname = current_func_name && dst = ret_val && List.length params = List.length args ->
+            let assignments = List.map2 (fun p a -> Assign (Var p, a)) params args in
+            block.insts <- (List.rev rest_rev) @ assignments;
+            block.terminator <- TermGoto entry_label;
+            modified := true
+        | _ -> ())
+    | _ -> ()
+  ) func.blocks;
+  (func, !modified)
+
+let optimize (func : ir_func_o) : ir_func_o =
+  let func_ref = ref { func with blocks = build_cfg func.blocks } in
+  let changed_in_iter = ref true in
+  while !changed_in_iter do
+    changed_in_iter := false;
+    let run_pass pass =
+      let (new_blocks, changed) = pass !func_ref.blocks in
+      if changed then changed_in_iter := true;
+      (* FIX: Added missing curly braces for record update syntax *)
+      { !func_ref with blocks = build_cfg new_blocks }
+    in
+    func_ref := run_pass constant_propagation;
+    func_ref := run_pass dead_code_elimination;
     let (tro_func, tro_changed) = tail_recursion_optimization !func_ref in
     if tro_changed then (changed_in_iter := true; func_ref := {tro_func with blocks = build_cfg tro_func.blocks});
   done;
