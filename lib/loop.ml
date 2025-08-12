@@ -1,5 +1,6 @@
 (* loop.ml *)
 open Ir
+
 module StringSet = Set.Make(String)
 module StringMap = Map.Make(String)
 
@@ -14,8 +15,9 @@ type dominator_info = {
 
 (* 计算支配树 *)
 let analyze_dominators (blocks: ir_block list) (entry_label: string) : dominator_info =
+ 
   let all_nodes = List.fold_left (fun s b -> StringSet.add b.label s) StringSet.empty blocks in
-
+  
   let doms = ref (List.fold_left (fun m b ->
     if b.label = entry_label then StringMap.add b.label (StringSet.singleton entry_label) m
     else StringMap.add b.label all_nodes m
@@ -210,24 +212,23 @@ let loop_invariant_code_motion (func : ir_func_o) : (ir_func_o * bool) =
   List.iter (fun loop ->
     (* Step 1: Create a preheader for the loop *)
     let header = StringMap.find loop.header !block_map_ref in
-    let preheader_label_str =
+    let preheader_label =
       if List.length header.preds = 1 then
         let pred_label = List.hd header.preds in
-        if not (StringSet.mem pred_label loop.blocks) then
-          let pred_block = StringMap.find pred_label !block_map_ref in
-          if List.length pred_block.succs = 1 then pred_label (* Predecessor is a valid preheader *)
-          else ""
+        let pred_block = StringMap.find pred_label !block_map_ref in
+        if List.length pred_block.succs = 1 then pred_label (* Predecessor is a valid preheader *)
         else ""
       else ""
     in
     let (_, preheader_block) =
-      if preheader_label_str <> "" then (preheader_label_str, StringMap.find preheader_label_str !block_map_ref)
+      if preheader_label <> "" then (preheader_label, StringMap.find preheader_label !block_map_ref)
       else (
         changed := true;
         let new_ph_label = new_label "preheader" in
         let new_ph_block = { label=new_ph_label; insts=[]; terminator=TermGoto loop.header; preds=[]; succs=[loop.header] } in
         
-        let original_preds = List.filter (fun p -> not (StringSet.mem p loop.blocks)) header.preds in
+        (* Rewire CFG *)
+        let original_preds = header.preds in
         List.iter (fun p_label ->
           let pred_block = StringMap.find p_label !block_map_ref in
           pred_block.succs <- new_ph_label :: (List.filter ((<>) loop.header) pred_block.succs);
@@ -236,11 +237,11 @@ let loop_invariant_code_motion (func : ir_func_o) : (ir_func_o * bool) =
             | TermIf (c, t, e) when t = loop.header -> pred_block.terminator <- TermIf (c, new_ph_label, e)
             | TermIf (c, t, e) when e = loop.header -> pred_block.terminator <- TermIf (c, t, new_ph_label)
             | TermSeq l when l = loop.header -> pred_block.terminator <- TermSeq new_ph_label
-            | _ -> ()
+            | _ -> () (* This might happen for complex CFGs, may need more robust handling *)
           end;
           new_ph_block.preds <- p_label :: new_ph_block.preds
         ) original_preds;
-        header.preds <- new_ph_label :: (List.filter (fun p -> StringSet.mem p loop.blocks) header.preds);
+        header.preds <- [new_ph_label];
         block_map_ref := StringMap.add new_ph_label new_ph_block !block_map_ref;
         (new_ph_label, new_ph_block)
       )
@@ -258,11 +259,13 @@ let loop_invariant_code_motion (func : ir_func_o) : (ir_func_o * bool) =
           else
             let used = get_used_vars inst in
             let def_var = get_def_var_name inst in
+            (* An instruction is invariant if all used variables are defined outside the loop *)
             let is_invariant = StringSet.for_all (fun var ->
               let defs_of_var = DefSet.filter (fun (v,_) -> v = var) block_in_defs in
               not (DefSet.is_empty defs_of_var) && DefSet.for_all (fun (_, def_label) -> not (StringSet.mem def_label loop.blocks)) defs_of_var
             ) used
             in
+            (* Also, ensure we don't move a re-definition out of the loop *)
             let is_redefined_in_loop =
               match def_var with
               | None -> false

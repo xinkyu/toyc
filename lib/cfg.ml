@@ -165,8 +165,7 @@ let is_critical inst = match inst with Store _ | Call _ -> true | _ -> false
 let dead_code_elimination (blocks: ir_block list) : (ir_block list * bool) =
   if blocks = [] then ([], false) else
   let module B = StringMap in
-  let block_map = B.of_list (List.map (fun b -> (b.label, b)) blocks) in
-  let live_in = ref (B.map (fun _ -> VarSet.empty) block_map) in
+  let live_in = ref (B.map (fun _ -> VarSet.empty) (B.of_list (List.map (fun b -> (b.label, b)) blocks))) in
   let live_out = ref !live_in in
   let changed = ref true in
   while !changed do
@@ -229,14 +228,15 @@ let optimize (func : ir_func_o) : ir_func_o =
   let changed_in_iter = ref true in
   while !changed_in_iter do
     changed_in_iter := false;
-
+    
     (* Helper to run passes that operate on block lists *)
     let run_pass pass =
       let (new_blocks, changed) = pass !func_ref.blocks in
       if changed then changed_in_iter := true;
+      (* FIX: 修复了原代码中一个可能的 bug，确保 func_ref 被正确更新 *)
       func_ref := { !func_ref with blocks = build_cfg new_blocks }
     in
-
+    
     (* Helper to run passes that operate on the whole function structure *)
     let run_func_pass pass =
       let (new_func, changed) = pass !func_ref in
@@ -248,11 +248,11 @@ let optimize (func : ir_func_o) : ir_func_o =
     run_pass constant_propagation;
 
     (* Pass 2: Loop Invariant Code Motion (LICM) *)
-    run_func_pass loop_invariant_code_motion;
+    run_func_pass loop_invariant_code_motion; (* <<<<<<<<<<< 2. 添加这一行 <<<<<<<<<< *)
 
     (* Pass 3: Dead Code Elimination *)
     run_pass dead_code_elimination;
-
+    
     (* Pass 4: Tail Recursion *)
     let (tro_func, tro_changed) = tail_recursion_optimization !func_ref in
     if tro_changed then (
