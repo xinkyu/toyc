@@ -1,6 +1,6 @@
 (library
- (name compilerlib)
- (modules lexer parser ast ir print_ast print_ir astToIR cfg loop IrToAsm)) 
+ (name compilerlib))
+
 (rule
  (targets parser.ml parser.mli parser.output)
  (deps parser.mly)

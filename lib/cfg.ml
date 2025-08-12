@@ -1,14 +1,160 @@
 (* cfg.ml *)
 open Ir
-open Loop
 module StringSet = Set.Make(String)
 module StringMap = Map.Make(String)
 
 (* A module to manage block-level data for dataflow analyses *)
 module BlockMap = Map.Make(String)
 
-type const_state = IsConst of int | NotAConst
+(*******************************************************************)
+(* Dominator Analysis                                              *)
+(*******************************************************************)
 
+module Dominator = struct
+  module LabelMap = StringMap
+  module LabelSet = StringSet
+
+  (* Check if block 'd' dominates block 'u' *)
+  let dominates (idom_map: string LabelMap.t) d u =
+    let rec is_dominated_by curr target =
+      if curr = target then true
+      else match LabelMap.find_opt curr idom_map with
+      | Some parent -> 
+          (* To prevent infinite loop on root which might dominate itself in some representations *)
+          if parent = curr then false 
+          else is_dominated_by parent target
+      | None -> false
+    in
+    is_dominated_by u d
+
+  (* Computes immediate dominators for all blocks in a function *)
+  let compute_idom (blocks : ir_block list) (entry_label : string) : string LabelMap.t =
+    let all_nodes = List.map (fun b -> b.label) blocks in
+    let block_map = List.fold_left (fun m b -> LabelMap.add b.label b m) StringMap.empty blocks in
+    
+    let doms = ref (List.fold_left (fun m l ->
+      LabelMap.add l (if l = entry_label then LabelSet.singleton entry_label else LabelSet.of_list all_nodes) m
+    ) LabelMap.empty all_nodes) in
+
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      List.iter (fun label ->
+        if label <> entry_label then
+          let block = LabelMap.find label block_map in
+          let preds = block.preds in
+          if preds <> [] then
+            let pred_doms_sets = List.map (fun p -> LabelMap.find p !doms) preds in
+            let intersected_doms = List.fold_left LabelSet.inter (List.hd pred_doms_sets) (List.tl pred_doms_sets) in
+            let new_dom_set = LabelSet.add label intersected_doms in
+            if not (LabelSet.equal (LabelMap.find label !doms) new_dom_set) then begin
+              doms := LabelMap.add label new_dom_set !doms;
+              changed := true
+            end
+      ) all_nodes;
+    done;
+
+    let idom = ref LabelMap.empty in
+    LabelMap.iter (fun n dom_set_n ->
+      let sdoms = LabelSet.remove n dom_set_n in
+      LabelSet.iter (fun m ->
+        if LabelSet.for_all (fun p -> p = m || not (LabelSet.mem m (LabelMap.find p !doms))) sdoms then
+          idom := LabelMap.add n m !idom
+      ) sdoms
+    ) !doms;
+    !idom
+end
+
+(*******************************************************************)
+(* Loop Detection and Utilities                                    *)
+(*******************************************************************)
+
+type loop = {
+  header: string;                (* Loop header label *)
+  blocks: Dominator.LabelSet.t;  (* Set of all basic blocks in the loop *)
+}
+
+let find_loops (blocks: ir_block list) (idom: string StringMap.t) : loop list =
+  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
+  let back_edges = ref [] in
+  
+  List.iter (fun u_block ->
+    List.iter (fun h_label ->
+      if Dominator.dominates idom h_label u_block.label then
+        back_edges := (u_block.label, h_label) :: !back_edges
+    ) u_block.succs
+  ) blocks;
+
+  let loops_map = ref StringMap.empty in
+  List.iter (fun (u, h) ->
+    let existing_blocks = try StringMap.find h !loops_map with Not_found -> StringSet.empty in
+    let worklist = Queue.create () in
+    Queue.add u worklist;
+    let loop_blocks = ref (StringSet.add h (StringSet.add u existing_blocks)) in
+    
+    while not (Queue.is_empty worklist) do
+      let curr_label = Queue.take worklist in
+      let curr_block = StringMap.find curr_label block_map in
+      List.iter (fun pred_label ->
+        if not (StringSet.mem pred_label !loop_blocks) then (
+          loop_blocks := StringSet.add pred_label !loop_blocks;
+          Queue.add pred_label worklist
+        )
+      ) curr_block.preds
+    done;
+    loops_map := StringMap.add h !loop_blocks !loops_map
+  ) !back_edges;
+  
+  StringMap.fold (fun h b acc -> { header = h; blocks = b } :: acc) !loops_map []
+
+let preheader_counter = ref 0
+
+let create_or_get_preheader (all_blocks: ir_block list ref) (loop: loop) : ir_block * bool =
+  let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty !all_blocks in
+  let header_block = StringMap.find loop.header block_map in
+  
+  let outside_preds = List.filter (fun p -> not (StringSet.mem p loop.blocks)) header_block.preds in
+  
+  if List.length outside_preds = 1 then
+    let pred_label = List.hd outside_preds in
+    let pred_block = StringMap.find pred_label block_map in
+    if List.length pred_block.succs = 1 then
+      (pred_block, false)
+    else
+      ()
+  else if List.length outside_preds = 0 then
+      (header_block, false)
+  else
+      ();
+
+  incr preheader_counter;
+  let preheader_label = "preheader_" ^ loop.header ^ "_" ^ string_of_int !preheader_counter in
+  let new_preheader = {
+    label = preheader_label;
+    insts = [];
+    terminator = TermGoto loop.header;
+    preds = outside_preds;
+    succs = [loop.header];
+  } in
+
+  List.iter (fun p_label ->
+    let p_block = StringMap.find p_label block_map in
+    p_block.succs <- preheader_label :: (List.filter (fun s -> s <> loop.header) p_block.succs);
+    p_block.terminator <- (match p_block.terminator with
+      | TermGoto l when l = loop.header -> TermGoto preheader_label
+      | TermSeq l when l = loop.header -> TermSeq preheader_label
+      | TermIf (c, t, f) -> TermIf (c, (if t = loop.header then preheader_label else t), (if f = loop.header then preheader_label else f))
+      | other -> other
+    )
+  ) outside_preds;
+
+  let inside_preds = List.filter (fun p -> StringSet.mem p loop.blocks) header_block.preds in
+  header_block.preds <- preheader_label :: inside_preds;
+  
+  all_blocks := new_preheader :: !all_blocks;
+  (new_preheader, true)
+
+type const_state = IsConst of int | NotAConst
 type const_env = const_state StringMap.t
 
 (*******************************************************************)
@@ -141,9 +287,73 @@ let constant_propagation (blocks : ir_block list) : (ir_block list * bool) =
       out_envs := StringMap.add label out_env !out_envs;
       List.iter (fun succ -> if StringMap.mem succ block_map then Queue.add succ worklist) blk.succs
     end;
-    blk.insts <- new_insts; blk.terminator <- new_term;
+    blk.insts <- new_insts;
+    blk.terminator <- new_term;
   done;
   (blocks, !changed)
+
+(*******************************************************************)
+(* Loop Invariant Code Motion                                      *)
+(*******************************************************************)
+
+let get_inst_def inst = match def inst with
+  | s when VarSet.is_empty s -> None
+  | s -> Some (VarSet.choose s)
+
+let loop_invariant_code_motion (blocks: ir_block list) : (ir_block list * bool) =
+  if blocks = [] then ([], false) else
+  let entry_label = (List.hd blocks).label in
+  let idom = Dominator.compute_idom blocks entry_label in
+  let loops = find_loops blocks idom in
+  let overall_modified = ref false in
+  let all_blocks = ref blocks in
+
+  List.iter (fun loop ->
+    let (preheader, preheader_created) = create_or_get_preheader all_blocks loop in
+    if preheader_created then overall_modified := true;
+    let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty !all_blocks in
+
+    let loop_defs = ref StringSet.empty in
+    StringSet.iter (fun label ->
+        let b = StringMap.find label block_map in
+        List.iter (fun inst -> match get_inst_def inst with Some d -> loop_defs := StringSet.add d !loop_defs | None -> ()) b.insts
+    ) loop.blocks;
+
+    let invariants = ref [] in (* (instruction, original_block_label) *)
+    let iter_changed = ref true in
+    while !iter_changed do
+      iter_changed := false;
+      StringSet.iter (fun label ->
+        let b = StringMap.find label block_map in
+        List.iter (fun inst ->
+          if not (List.exists (fun (i,_) -> i = inst) !invariants) then
+            let uses = use inst in
+            let is_invariant = VarSet.for_all (fun var ->
+              let is_defined_by_invariant = List.exists (fun (i,_) -> get_inst_def i = Some var) !invariants in
+              not (StringSet.mem var !loop_defs) || is_defined_by_invariant
+            ) uses in
+            
+            if is_invariant then
+              match get_inst_def inst with
+              | Some _ ->
+                if not (is_critical inst) then begin
+                  invariants := (inst, b.label) :: !invariants;
+                  iter_changed := true;
+                  overall_modified := true
+                end
+              | None -> ()
+        ) b.insts
+      ) loop.blocks
+    done;
+    
+    let moved_instructions = List.map fst !invariants in
+    List.iter (fun (inst, orig_label) ->
+      let orig_block = StringMap.find orig_label block_map in
+      orig_block.insts <- List.filter ((<>) inst) orig_block.insts
+    ) !invariants;
+    preheader.insts <- preheader.insts @ moved_instructions;
+  ) loops;
+  (!all_blocks, !overall_modified)
 
 (*******************************************************************)
 (* Dead Code Elimination *)
@@ -165,7 +375,8 @@ let is_critical inst = match inst with Store _ | Call _ -> true | _ -> false
 let dead_code_elimination (blocks: ir_block list) : (ir_block list * bool) =
   if blocks = [] then ([], false) else
   let module B = StringMap in
-  let live_in = ref (B.map (fun _ -> VarSet.empty) (B.of_list (List.map (fun b -> (b.label, b)) blocks))) in
+  let block_map = B.of_list (List.map (fun b -> (b.label, b)) blocks) in
+  let live_in = ref (B.map (fun _ -> VarSet.empty) block_map) in
   let live_out = ref !live_in in
   let changed = ref true in
   while !changed do
@@ -207,7 +418,7 @@ let tail_recursion_optimization (func : ir_func_o) : (ir_func_o * bool) =
     | TermRet (Some ret_val) ->
         (match List.rev block.insts with
         | Assign(dst_assign, src_assign) :: Call(dst_call, fname, args) :: rest_rev
-           when dst_assign = ret_val && src_assign = dst_call && fname = current_func_name && List.length params = List.length args ->
+          when dst_assign = ret_val && src_assign = dst_call && fname = current_func_name && List.length params = List.length args ->
             let assignments = List.map2 (fun p a -> Assign (Var p, a)) params args in
             block.insts <- (List.rev rest_rev) @ assignments;
             block.terminator <- TermGoto entry_label;
@@ -228,36 +439,18 @@ let optimize (func : ir_func_o) : ir_func_o =
   let changed_in_iter = ref true in
   while !changed_in_iter do
     changed_in_iter := false;
-    
-    (* Helper to run passes that operate on block lists *)
     let run_pass pass =
       let (new_blocks, changed) = pass !func_ref.blocks in
       if changed then changed_in_iter := true;
-      (* FIX: 修复了原代码中一个可能的 bug，确保 func_ref 被正确更新 *)
-      func_ref := { !func_ref with blocks = build_cfg new_blocks }
+      { !func_ref with blocks = build_cfg new_blocks }
     in
+    func_ref := run_pass constant_propagation;
     
-    (* Helper to run passes that operate on the whole function structure *)
-    let run_func_pass pass =
-      let (new_func, changed) = pass !func_ref in
-      if changed then changed_in_iter := true;
-      func_ref := { new_func with blocks = build_cfg new_func.blocks }
-    in
+    (* ADDED: Loop Invariant Code Motion Pass *)
+    func_ref := run_pass loop_invariant_code_motion;
 
-    (* Pass 1: Constant Propagation *)
-    run_pass constant_propagation;
-
-    (* Pass 2: Loop Invariant Code Motion (LICM) *)
-    run_func_pass loop_invariant_code_motion; (* <<<<<<<<<<< 2. 添加这一行 <<<<<<<<<< *)
-
-    (* Pass 3: Dead Code Elimination *)
-    run_pass dead_code_elimination;
-    
-    (* Pass 4: Tail Recursion *)
+    func_ref := run_pass dead_code_elimination;
     let (tro_func, tro_changed) = tail_recursion_optimization !func_ref in
-    if tro_changed then (
-      changed_in_iter := true;
-      func_ref := {tro_func with blocks = build_cfg tro_func.blocks}
-    );
+    if tro_changed then (changed_in_iter := true; func_ref := {tro_func with blocks = build_cfg tro_func.blocks});
   done;
   !func_ref
