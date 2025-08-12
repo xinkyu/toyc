@@ -313,12 +313,11 @@ let create_preheader (blocks : ir_block list) (header : string) : ir_block list 
   preheader :: blocks
 
 (* 分析循环不变量 *)
-let find_loop_invariants (blocks : ir_block list) (loop_blocks : string list) (header : string) : ir_inst list =
+let find_loop_invariants (blocks : ir_block list) (loop_blocks : string list) (_ : string) : ir_inst list =
   let block_map = List.fold_left (fun m b -> StringMap.add b.label b m) StringMap.empty blocks in
-  let loop_set = StringSet.of_list loop_blocks in
   
   (* 检查操作数是否循环不变 *)
-  let rec is_operand_invariant op defined_in_loop =
+  let is_operand_invariant op defined_in_loop =
     match op with
     | Imm _ -> true
     | Var name | Reg name ->
@@ -342,12 +341,12 @@ let find_loop_invariants (blocks : ir_block list) (loop_blocks : string list) (h
   (* 检查指令是否循环不变 *)
   let is_inst_invariant inst =
     match inst with
-    | Binop(_, dst, src1, src2) ->
+    | Binop(_, _, src1, src2) ->
         is_operand_invariant src1 defined_in_loop &&
         is_operand_invariant src2 defined_in_loop
-    | Unop(_, dst, src) ->
+    | Unop(_, _, src) ->
         is_operand_invariant src defined_in_loop
-    | Assign(dst, src) ->
+    | Assign(_, src) ->
         is_operand_invariant src defined_in_loop
     | _ -> false
   in
