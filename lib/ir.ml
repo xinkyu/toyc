@@ -8,14 +8,12 @@ type ir_inst =
   | Unop of string * operand * operand (* t1 = -t2 *)
   | Load of operand * operand (* t1 = *t2 *)
   | Store of operand * operand (* *t1 = t2 *)
-  | Goto of string (* 优化的 IR 没有 *)
-  | IfGoto of operand * string (* 优化的 IR 没有 *)
-  | Label of string (* 优化的 IR 没有 *)
+  | Goto of string 
+  | IfGoto of operand * string 
+  | Label of string 
   | Call of operand * string * operand list
-  (* 优化后的 IR 没有 *)
-  (* t1 = call f(args) *)
-  | Ret of operand option (* 优化后的 IR 没有 *)
-  | Assign of operand * operand (* t1 = t2 *)
+  | Ret of operand option 
+  | Assign of operand * operand 
 
 type ir_func = { name : string; args : string list; body : ir_inst list }
 
@@ -35,6 +33,5 @@ type ir_block = {
   mutable succs : string list;
 }
 
-(* 用于 IR 优化的 func 定义 *)
 type ir_func_o = { name : string; args : string list; blocks : ir_block list }
 type ir_program = Ir_funcs of ir_func list | Ir_funcs_o of ir_func_o list

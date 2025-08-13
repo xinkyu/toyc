@@ -18,15 +18,15 @@ let reserved = [
 }
 
 (* Regular expression definitions *)
-let digit = ('0' | ['1'-'9'] ['0'-'9']*)
-let nondigit = ['a'-'z' 'A'-'Z' '_']
-let ident = nondigit (nondigit | digit)*
-(* let integer = '-'? ( '0' | ['1'-'9'] digit* ) *)
-let whitespace = [' ' '\t' '\r']
+let dig = ('0' | ['1'-'9'] ['0'-'9']*)
+let nondig = ['a'-'z' 'A'-'Z' '_']
+let ident = nondig (nondig | dig)*
+
+let space = [' ' '\t' '\r']
 
 rule token = parse
-  | whitespace+    { token lexbuf }  (* Skip whitespace *)
-  | '\n'           { new_line lexbuf; token lexbuf } (* Count lines *)
+  | space+    { token lexbuf }  
+  | '\n'           { new_line lexbuf; token lexbuf } 
   
   (* Comments *)
   | "//" [^ '\n']* { token lexbuf }  (* 单行 *)
@@ -39,7 +39,7 @@ rule token = parse
     }
   
   (* Integer literals *)
-  | digit as n   { NUMBER (int_of_string n) }
+  | dig as n   { NUMBER (int_of_string n) }
   
   (* Operators *)
   | "=="   { EQ }
