@@ -7,7 +7,6 @@
  (action
   (chdir
    %{workspace_root}
-   ;; 提供 .output 文件在 ./_build/default/lib/parser.output
    (run ocamlyacc -v lib/parser.mly))))
 
 (rule

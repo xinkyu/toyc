@@ -1,8 +1,7 @@
 {
-open Parser  (* Import token types from parser *)
-open Lexing  (* For position handling *)
+open Parser  
+open Lexing  
 
-(* Reserved keywords mapping *)
 let reserved = [
   ("int", INT);
   ("void", VOID);
@@ -17,7 +16,6 @@ let reserved = [
 
 }
 
-(* Regular expression definitions *)
 let dig = ('0' | ['1'-'9'] ['0'-'9']*)
 let nondig = ['a'-'z' 'A'-'Z' '_']
 let ident = nondig (nondig | dig)*
@@ -28,20 +26,16 @@ rule token = parse
   | space+    { token lexbuf }  
   | '\n'           { new_line lexbuf; token lexbuf } 
   
-  (* Comments *)
-  | "//" [^ '\n']* { token lexbuf }  (* 单行 *)
-  | "/*"           { comment lexbuf } (* 多行 *)
+  | "//" [^ '\n']* { token lexbuf }  
+  | "/*"           { comment lexbuf } 
   
-  (* Identifiers and keywords *)
   | ident as id    { 
       try List.assoc id reserved 
       with Not_found -> ID id 
     }
   
-  (* Integer literals *)
   | dig as n   { NUMBER (int_of_string n) }
   
-  (* Operators *)
   | "=="   { EQ }
   | "!="   { NEQ }
   | "<="   { LE }
@@ -58,7 +52,6 @@ rule token = parse
   | '%'    { MOD }
   | '!'    { NOT }
   
-  (* Punctuation *)
   | ';'    { SEMI }
   | ','    { COMMA }
   | '('    { LPAREN }
@@ -66,18 +59,15 @@ rule token = parse
   | '{'    { LBRACE }
   | '}'    { RBRACE }
   
-  (* End of file *)
   | eof    { EOF }
   
-  (* Invalid character *)
   | _ as c  {
       let pos = lexbuf.lex_curr_p in
       failwith (Printf.sprintf "Illegal character '%c' at line %d, column %d"
         c pos.pos_lnum (pos.pos_cnum - pos.pos_bol)) }
 
-(* Comment handling rule *)
 and comment = parse
-  | "*/"   { token lexbuf }        (* End of comment *)
-  | '\n'   { new_line lexbuf; comment lexbuf }  (* Count lines in comments *)
-  | _      { comment lexbuf }      (* Any other char in comment *)
+  | "*/"   { token lexbuf }     
+  | '\n'   { new_line lexbuf; comment lexbuf }
+  | _      { comment lexbuf }     
   | eof    { failwith "Unterminated comment" }

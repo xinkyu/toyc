@@ -1,37 +1,45 @@
-type operand =
-  | Reg of string (* 临时寄存器 *)
-  | Imm of int (* 立即数 *)
-  | Var of string (* 变量名 *)
 
-type ir_inst =
-  | Binop of string * operand * operand * operand (* t1 = t2 + t3 *)
-  | Unop of string * operand * operand (* t1 = -t2 *)
-  | Load of operand * operand (* t1 = *t2 *)
-  | Store of operand * operand (* *t1 = t2 *)
+type operand =
+  | Reg of string 
+  | Imm of int 
+  | Var of string
+
+module OperandSet = Set.Make (struct
+  type t = operand
+  let compare = compare
+end)
+
+
+type inst_r =
+  | Binop of string * operand * operand * operand 
+  | Unop of string * operand * operand 
+  | Load of operand * operand 
+  | Store of operand * operand 
   | Goto of string 
   | IfGoto of operand * string 
   | Label of string 
   | Call of operand * string * operand list
+  | TailCall of string * operand list 
   | Ret of operand option 
   | Assign of operand * operand 
 
-type ir_func = { name : string; args : string list; body : ir_inst list }
-
-(* 用于优化 *)
-type ir_term =
+  type term_r =
   | TermGoto of string
   | TermIf of operand * string * string
   | TermRet of operand option
   | TermSeq of string
-  (* | TermCall (* 不用管 *) *)
 
-type ir_block = {
+  type block_r = {
   label : string;
-  mutable insts : ir_inst list;
-  mutable terminator : ir_term;
+  mutable insts : inst_r list;
+  mutable terminator : term_r;
   mutable preds : string list;
   mutable succs : string list;
+  mutable l_in : OperandSet.t;
+  mutable l_out : OperandSet.t;
 }
+type func_r = { name : string; args : string list; body : inst_r list }
 
-type ir_func_o = { name : string; args : string list; blocks : ir_block list }
-type ir_program = Ir_funcs of ir_func list | Ir_funcs_o of ir_func_o list
+
+type ir_func_o = { name : string; args : string list; blocks : block_r list }
+type ir_program = Ir_funcs of func_r list | Ir_funcs_o of ir_func_o list

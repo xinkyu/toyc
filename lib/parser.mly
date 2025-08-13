@@ -24,7 +24,7 @@ open Ast
 %left TIMES DIV MOD
 %right NOT UOP_MINUS UOP_PLUS
 
-/* Start symbol */
+
 %start comp_unit
 %type <Ast.comp_unit> comp_unit
 
@@ -53,7 +53,7 @@ typ:
   | VOID  { TVoid }
 
 param_list_opt:
-  | /* empty */   { [] }
+  |  { [] }
   | param_list    { $1 }
 
 param_list:
@@ -61,13 +61,12 @@ param_list:
   | param_list COMMA param  { $1 @ [$3] }
 
 param:
-  | INT ID   { $2 }  /* Only name is stored, type is always int */
-
+  | INT ID   { $2 } 
 block:
   | LBRACE stmt_list RBRACE   { $2 }
 
 stmt_list:
-  | /* empty */   { [] }
+  |  { [] }
   | stmt_list stmt { $1 @ [$2] }
 
 stmt:
@@ -75,8 +74,7 @@ stmt:
   | SEMI    { Empty }
   | expr SEMI   { ExprStmt $1 }
   | ID ASSIGN expr SEMI   { Assign ($1, $3) }
-  // 其实 toyc 里没有 79 行对应语法
-  | INT ID SEMI   { Decl ($2, None) }  /* Declaration without initialization */
+  | INT ID SEMI   { Decl ($2, None) } 
   | INT ID ASSIGN expr SEMI   { Decl ($2, Some $4) }
   | IF LPAREN expr RPAREN stmt %prec IFX
       { If ($3, $5, None) }
@@ -89,7 +87,6 @@ stmt:
   | RETURN SEMI   { Return None }
   | RETURN expr SEMI   { Return (Some $2) }
 
-/* Expression hierarchy */
 expr:
     | expr TIMES expr { Binop (Mul, $1, $3) }
     | expr DIV expr   { Binop (Div, $1, $3) }
@@ -116,7 +113,7 @@ primary:
   | ID LPAREN arg_list_opt RPAREN   { Call ($1, $3) }
 
 arg_list_opt:
-  | /* empty */   { [] }
+  |  { [] }
   | arg_list      { $1 }
 
 arg_list:

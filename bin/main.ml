@@ -16,8 +16,7 @@ let parse_program (s : string) : func_def list =
 let () =
   Printexc.record_backtrace true;
 
-  (* 支持从 stdin 读取所有输入 *)
-  let read_all_input () =
+  let read_input () =
     let rec aux acc =
       try
         let line = input_line stdin in
@@ -26,32 +25,20 @@ let () =
     in
     aux []
   in
-
-  (* 处理命令行参数 *)
   let args = Array.to_list Sys.argv |> List.tl in
   let option_flags = [ "-print_ast"; "-print_ir"; "-block-ir"; "-opt" ] in
-  let print_ast = List.exists (( = ) "-print_ast") args in
-  let print_ir = List.exists (( = ) "-print_ir") args in
-  let block_ir = List.exists (( = ) "-block-ir") args in
-  let opt_flag = List.exists (( = ) "-opt") args in
-  let opt_flag = block_ir || opt_flag in
+  let print_liveness = List.exists (( = ) "-print_live") args in
+  let bl_ir = List.exists (( = ) "-block-ir") args in
+  let opt_fla = List.exists (( = ) "-opt") args in
+  let print_all = List.exists (( = ) "-print_alloc") args in
+  let opt_fla = bl_ir || opt_fla in
 
-  (* 读取 stdin 输入 *)
-  let input = read_all_input () in
+  let input = read_input () in
 
-  (* 解析 AST *)
   let ast = parse_program input in
 
-  if print_ast then
-    Printf.printf "AST:\n\n%s\n\n" (Print_ast.string_of_comp_unit ast);
+  let ir = AstToIR.pro_ir ast  opt_fla print_liveness in
 
-  let ir = AstToIR.program_ir ast true in
-
-  if print_ir then begin 
-    Printf.printf "IR:\n\n";
-    Print_ir.print_ir_program ir;
-  end ;
-
-  let asm = IrToAsm.com_pro ir in
+  let asm = IrToAsm.com_pro ir  print_all in
 
   Printf.printf "\n\n%s\n" asm
